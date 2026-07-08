@@ -1,0 +1,77 @@
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  # Never cancel an in-progress deployment: GitHub's Pages backend rolls the
+  # site out asynchronously after the job creates the deployment, and killing
+  # a run mid-rollout can leave that backend in a state where the NEXT run
+  # reports "Deployment failed, try again later." This matches GitHub's own
+  # static-site starter workflow. Queued runs still collapse to the latest.
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      # url comes from whichever deploy attempt below actually succeeded
+      url: ${{ steps.deploy1.outputs.page_url || steps.deploy2.outputs.page_url || steps.deploy3.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v5
+        with:
+          # create/enable the Pages site on first run, so no manual
+          # Settings -> Pages step is needed
+          enablement: true
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          # the repo is the site: no build step
+          path: .
+          # unique per attempt: deploy-pages hard-fails if a manual RE-RUN
+          # finds two artifacts with the same name left over from the earlier
+          # attempt. The auto-retries below all reuse this one artifact.
+          name: github-pages-${{ github.run_attempt }}
+
+      # actions/deploy-pages fails the whole job the moment GitHub's Pages
+      # backend returns a transient "Deployment failed, try again later." —
+      # a flaky-but-harmless error that clears on its own within seconds.
+      # Rather than force a manual re-run each time, retry the deploy up to
+      # three times with a growing backoff; a fresh deployment from the same
+      # (already-uploaded) artifact almost always sticks on the second try.
+      - id: deploy1
+        uses: actions/deploy-pages@v4
+        continue-on-error: true
+        with:
+          artifact_name: github-pages-${{ github.run_attempt }}
+
+      - name: Wait, then retry deploy (attempt 2)
+        if: steps.deploy1.outcome == 'failure'
+        run: sleep 20
+      - id: deploy2
+        if: steps.deploy1.outcome == 'failure'
+        uses: actions/deploy-pages@v4
+        continue-on-error: true
+        with:
+          artifact_name: github-pages-${{ github.run_attempt }}
+
+      - name: Wait, then retry deploy (attempt 3)
+        if: steps.deploy1.outcome == 'failure' && steps.deploy2.outcome == 'failure'
+        run: sleep 40
+      - id: deploy3
+        # no continue-on-error: if the third attempt also fails, the backend
+        # is genuinely unhealthy (or the site is misconfigured) and the job
+        # SHOULD go red so it's visible rather than silently stale.
+        if: steps.deploy1.outcome == 'failure' && steps.deploy2.outcome == 'failure'
+        uses: actions/deploy-pages@v4
+        with:
+          artifact_name: github-pages-${{ github.run_attempt }}

@@ -1,0 +1,19 @@
+{
+  "name": "quest-desert-fireworks-vr",
+  "version": "1.0.0",
+  "description": "A WebXR fireworks sandbox for Meta Quest 3: a desert at night, an endless crate of fireworks, and very big booms.",
+  "type": "module",
+  "scripts": {
+    "start": "node tools/serve.mjs",
+    "start:https": "node tools/serve.mjs --https"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/wildelmo/quest-desert-fireworks-vr"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "playwright-core": "^1.61.1",
+    "three": "^0.166.1"
+  }
+}

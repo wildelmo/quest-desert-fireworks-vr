@@ -1,0 +1,6 @@
+explosion1.wav and explosion2.wav are CC0 recordings by Kenney (www.kenney.nl),
+redistributed here under Creative Commons Zero:
+http://creativecommons.org/publicdomain/zero/1.0/
+
+They were obtained from the "arcade" Python package resource bundle, which
+ships them with the same CC0 license text.

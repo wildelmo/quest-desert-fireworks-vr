@@ -1,0 +1,8 @@
+node_modules/
+.devcert/
+shots/
+*.log
+
+# Local assistant/config files — keep out of the public repo
+.claude/
+CLAUDE.md

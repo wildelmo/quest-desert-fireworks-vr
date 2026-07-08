@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>Desert Fireworks VR</title>
+  <meta name="description" content="A WebXR fireworks sandbox for Meta Quest: a desert at night, an endless crate of fireworks, and very big booms.">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎆</text></svg>">
+  <!-- bump ?v= together on each release: index.html then atomically pulls
+       matching assets instead of mixing fresh HTML with stale cached CSS/JS -->
+  <link rel="stylesheet" href="style.css?v=11">
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "./lib/three.module.js"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div id="overlay">
+    <div id="overlay-inner">
+      <h1>DESERT FIREWORKS</h1>
+      <p class="tagline">A quiet desert. A crate that never runs out. You, a torch, and the night sky.</p>
+      <div class="buttons">
+        <button id="btn-vr" disabled>Checking for VR…</button>
+      </div>
+      <div class="buttons-secondary">
+        <button id="btn-desktop">explore on desktop instead</button>
+      </div>
+      <div class="help">
+        <div class="help-col">
+          <h2>In VR (Quest)</h2>
+          <ul>
+            <li><b>Grip</b> — grab a firework or the torch</li>
+            <li><b>Push the stick into the sand</b> and let go to plant it — any angle you like</li>
+            <li><b>Touch the torch flame to a fuse</b> to light it… then step back</li>
+            <li><b>Left stick</b> — walk &nbsp;·&nbsp; <b>Right stick</b> — snap turn</li>
+          </ul>
+        </div>
+        <div class="help-col">
+          <h2>On Desktop</h2>
+          <ul>
+            <li><b>WASD + mouse</b> — move and look (click to capture the mouse)</li>
+            <li><b>E</b> — grab / drop &nbsp;·&nbsp; <b>Scroll</b> — tilt held firework</li>
+            <li><b>Left click</b> — plant held firework / light a fuse with the torch</li>
+            <li><b>F</b> — quick-launch a random rocket (lazy mode)</li>
+          </ul>
+        </div>
+      </div>
+      <p class="foot">Sound on. Everything you hear is synthesized live — turn it up for the bass.</p>
+    </div>
+  </div>
+  <div id="reticle"></div>
+  <div id="hud"></div>
+  <script type="module" src="src/main.js?v=11"></script>
+</body>
+</html>
