@@ -15,7 +15,7 @@ flame to the fuse. Step back.
 | Item | What it does |
 | --- | --- |
 | **Bottle Rocket** | small, quick, snappy pop |
-| **Sky Rocket** | the classic — peony, ring, willow, crossette… |
+| **Sky Rocket** | the classic — peony, dahlia, ring, willow, crossette… |
 | **Mammoth Rocket** | huge multi-break shells, palm bursts, serious bass |
 | **Grand Shell Rocket** | high, slow-opening display shells that fill much more of the sky |
 | **Desert Bloom Fountain** | 10 seconds of color-shifting sparks and hiss |

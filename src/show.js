@@ -12,6 +12,7 @@ import { PALETTES } from './fireworks.js';
 
 const WATERFALL_PALETTE = { name: 'molten silver', a: 0xfff3d8, b: 0xffd489 };
 const GOLD = { name: 'pure gold', a: 0xffc04d, b: 0xfff2bb };
+const PAL = (name) => PALETTES.find((p) => p.name === name) ?? randPick(PALETTES);
 const _sparkPos = new THREE.Vector3();
 
 export class FinaleShow {
@@ -95,7 +96,7 @@ export class FinaleShow {
     shell(6.3, 2, 'peony', 1.1);
     shell(6.9, 6, 'peony', 1.1);
     for (let i = 0; i < 10; i++) {
-      shell(8.5 + i * 0.85, (i * 3 + 1) % 9, randPick(['peony', 'ring', 'chrys']), randRange(0.8, 1.2));
+      shell(8.5 + i * 0.85, (i * 3 + 1) % 9, randPick(['peony', 'dahlia', 'ring', 'chrys']), randRange(0.8, 1.2));
     }
 
     // --- 18-33s: color chases, left to right and back ---
@@ -130,14 +131,18 @@ export class FinaleShow {
     shell(65, 2, 'waterfall', 0.8, { palette: WATERFALL_PALETTE, sound: 'small', flightT: 2.3, speed: 36, spread: 0.04 });
     shell(66.5, 6, 'waterfall', 0.8, { palette: WATERFALL_PALETTE, sound: 'small', flightT: 2.3, speed: 36, spread: 0.04 });
 
-    // --- 71-90s: second build — brocades and multibreaks in pairs ---
+    // --- 71-90s: second build — multibreaks, then the postcard tableau:
+    // the reference-photo sky, scarlet and teal dahlias flanking one huge
+    // golden chrysanthemum, violet off the right shoulder ---
     shell(71.5, 4, 'brocade', 1.4, { palette: GOLD });
     shell(73.4, 1, 'multibreak', 1.2);
     shell(75.6, 7, 'multibreak', 1.2);
-    shell(78, 3, 'brocade', 1.3);
-    shell(78.6, 5, 'brocade', 1.3);
-    shell(81, 0, 'peony', 1.1);
-    shell(81.5, 8, 'peony', 1.1);
+    shell(78, 1, 'dahlia', 1.15, { palette: PAL('scarlet pink') });
+    shell(78.55, 3, 'dahlia', 1.2, { palette: PAL('teal ember') });
+    shell(79.1, 4, 'chrys', 1.75, { palette: PAL('golden brocade'), flightT: 3.1, speed: 58 });
+    shell(79.8, 7, 'dahlia', 1.05, { palette: PAL('royal violet') });
+    shell(80.5, 8, 'dahlia', 1.0, { palette: PAL('scarlet pink') });
+    shell(81.4, 0, 'dahlia', 1.0, { palette: PAL('oasis teal') });
     shell(83.5, 4, 'salute', 0.9, { sound: 'big' });
     shell(85, 2, 'palm', 1.4);
     shell(86.5, 6, 'chrys', 1.4);
@@ -148,7 +153,7 @@ export class FinaleShow {
     let gap = 1.25;
     while (t < 104) {
       const p = (Math.random() * 9) | 0;
-      shell(t, p, randPick(['peony', 'ring', 'chrys', 'palm', 'brocade']), randRange(1.0, 1.4));
+      shell(t, p, randPick(['peony', 'dahlia', 'ring', 'chrys', 'palm', 'brocade']), randRange(1.0, 1.4));
       if (Math.random() < 0.3) shell(t + 0.18, (p + 4) % 9, 'salute', 0.8, { sound: 'big' });
       t += gap;
       gap = Math.max(0.55, gap * 0.93);
@@ -158,7 +163,7 @@ export class FinaleShow {
     t = 105;
     while (t < 117.5) {
       shell(t, (Math.random() * 9) | 0,
-        randPick(['peony', 'palm', 'brocade', 'chrys', 'multibreak', 'crackle']),
+        randPick(['peony', 'dahlia', 'palm', 'brocade', 'chrys', 'multibreak', 'crackle']),
         randRange(1.2, 1.7));
       t += randRange(0.3, 0.55);
     }
