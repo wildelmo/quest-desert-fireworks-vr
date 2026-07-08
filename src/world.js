@@ -1039,11 +1039,14 @@ export function createWorld(scene, fireworks, pool, audio) {
       lanternLight.intensity = 5.4 + Math.sin(time * 11) * 0.5 + Math.sin(time * 5.1) * 0.3;
       // bursts overhead wash the whole basin: the hemisphere light briefly
       // brightens and tints toward the shell color, so distant dunes and the
-      // campsite flicker with each detonation
+      // campsite flicker with each detonation — and the drone swarm adds its
+      // own steady wash, so 1200 LEDs visibly paint the desert they hang over
       const pulse = fireworks.ambientPulse;
       const e = Math.min(pulse.energy, 2.6);
-      hemi.intensity = HEMI_INTENSITY * (1 + e * 1.05);
+      const dg = droneShow.glow;
+      hemi.intensity = HEMI_INTENSITY * (1 + e * 1.05 + dg.energy);
       hemi.color.copy(HEMI_SKY).lerp(pulse.color, Math.min(0.65, e * 0.45));
+      if (dg.energy > 0.01) hemi.color.lerp(dg.color, Math.min(0.45, dg.energy * 0.7));
     },
   };
 }

@@ -41,18 +41,26 @@ to close. The handle springs back up when the desert goes quiet, ready to go aga
 
 Off to the **left** of camp stands a field console on a steel post — teal-bordered
 control head, whip antenna, a little status screen, one big green button. Press it
-(touch it with either hand in VR; click it on desktop) and **840 LED drones** wake up
-on a staging pad out in the western dunes and climb into the night in a rolling wave.
+(touch it with either hand in VR; click it on desktop) and **1,200 LED drones** wake
+up on a staging pad in the western dunes and climb into the night in a rolling wave.
 
-It's the anti-firework: silent (just a faint motor hum on the wind), slow, deliberate,
-nothing explodes. The swarm spends about three and a half minutes morphing through a
-program of formations — a glowing amber wall, a rotating **teal-to-violet sphere**, a
-turning **DNA helix**, a monumental **saguaro** with blossom crowns, a beating
-**heart**, a frozen **starburst** (one firework that never fades, as a courtesy to the
-hosts), a **crescent moon and star**, and a closing **GOOD NIGHT** written across the
-sky — then settles back onto the pad in columns and goes dark. The morphs are the
-point: drones peel off in waves, cruise on slow arcs, and arrive together as the next
-shape blooms, while colors ripple and sweep through the formation per-LED.
+It's the anti-firework: silent (just a soft swarm hum that tracks the fleet in 3D),
+slow, deliberate, nothing explodes — and it is **big**. The formations hang close
+enough to fill half the sky: a glowing amber wall, a breathing 70-meter
+**teal-to-violet sphere**, a turning **DNA helix**, a monumental **saguaro** with
+blossom crowns, a beating **heart**, a **starburst** that assembles as a dense golden
+ball and then *detonates* in slow motion (a firework you can watch happen, as a
+courtesy to the hosts), a **crescent moon and star**, and a closing **GOOD NIGHT**
+written a hundred meters wide — then the swarm settles back onto the pad in columns
+and goes dark.
+
+The centerpiece is the **HALO**: mid-show, the whole fleet streams across the sky
+and rebuilds as a giant rotating ring with an aurora dome swirling above it —
+**directly over the campsite**, comets chasing each other around the ring while you
+stand underneath looking straight up. The morphs are the point everywhere: drones
+peel off in waves, cruise on slow arcs, arrive together as the next shape blooms,
+colors ripple and sweep per-LED — and the desert answers, the dunes picking up the
+swarm's glow the way they flicker under the shell bursts.
 
 The console's screen tracks the current formation. Pressing the button mid-show
 **skips to the next formation**; it re-arms once the swarm lands. And yes — the
@@ -141,13 +149,17 @@ To audition any recipe without a headset: `node tools/render-sounds.mjs out whoo
 - Burst flash lights are pooled `PointLight`s that paint the dunes with the shell's
   color (fountain lights are pooled too — changing the scene's light count mid-show
   forces a shader recompile hitch on Quest, so the light count never changes).
-- The drone show (`src/drones.js`) renders all 840 LEDs as **one additive `Points`
+- The drone show (`src/drones.js`) renders all 1,200 LEDs as **one additive `Points`
   draw call**; the CPU flies the swarm with a per-drone spring-damper autopilot
   (retargeting matches drones to formation slots by height-band rank, then staggers
   departures so morphs flow instead of snapping). Formations are procedural point
   clouds — parametric solids, capsule strokes, and canvas-sampled text — in a frame
-  that faces the campsite. The distant swarm hum is synthesized like everything else:
-  a beating cluster of detuned motor tones over prop-wash noise.
+  that faces the campsite; scenes can carry their own center, which is how the halo
+  forms over the camp. The swarm lights the desert back through the shared
+  hemisphere wash plus one pooled `PointLight` riding the fleet centroid (the light
+  count never changes — same rule as the flash pool). The hum is synthesized like
+  everything else: a beating cluster of detuned motor tones over prop-wash noise,
+  on an HRTF panner so it audibly crosses overhead during the halo transit.
 - `tools/screenshot.mjs` is a headless QA harness (Playwright + SwiftShader) that loads
   the demo, verifies zero console errors, and captures screenshots.
 

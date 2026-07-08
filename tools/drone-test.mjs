@@ -40,7 +40,7 @@ const r = await page.evaluate(async () => {
 
   // ---- 1) the prop exists, armed; the swarm is parked on the pad ----
   out.armed = con.armed === true && show.state === 'idle';
-  out.fleetSize = N === 840;
+  out.fleetSize = N === 1200;
   out.parkedOnSand = Math.abs(show.pos[1] - (fireworks.groundHeight(show.pos[0], show.pos[2]) + 0.15)) < 0.3;
   out.pointsInScene = !!show.points.parent;
 
@@ -73,7 +73,7 @@ const r = await page.evaluate(async () => {
     // index-weighted checksum: same-center symmetric shapes can't collide
     let sum = 0;
     for (let j = 0; j < N; j += 7) {
-      show._slotWorld(s.data, j, 1, 0, 1, v);
+      show._slotWorld(s, j, 1, 0, 1, v);
       sum += (v.x * 1.3 + v.y * 2.7 + v.z * 3.1) * ((j % 13) + 1);
     }
     sums.add(Math.round(sum));
