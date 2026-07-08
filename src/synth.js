@@ -884,6 +884,63 @@ export function renderTorchLoop(ctx, seed = 1) {
 }
 
 // ---------------------------------------------------------------------------
+// Drone swarm at distance — hundreds of small props read as a soft airy
+// drone (the word predates the aircraft for a reason): a cluster of motor
+// tones all a few rpm apart, beating against each other, over a broadband
+// air wash with a slow blade-flutter undulation. No transients, no melody —
+// it should sit just above the wind and disappear when you stop listening.
+export function renderDroneSwarmLoop(ctx, seed = 1) {
+  const sr = ctx.sampleRate;
+  const dur = 6.0;
+  const N = Math.floor(dur * sr);
+  const rand = mulberry32(seed * 907 + 13);
+  let M = new Float32Array(N);
+
+  // motor tone cluster: fundamentals scattered ~90-160 Hz (blade-pass rates
+  // of small quads at hover), each with a weak 2nd harmonic. Slightly
+  // different frequencies make the cluster shimmer with beat notes instead
+  // of reading as one steady organ chord.
+  const K = 9;
+  const partials = [];
+  for (let k = 0; k < K; k++) {
+    partials.push({
+      f: 92 + rand() * 68,
+      a: 0.4 + rand() * 0.6,
+      ph: rand() * TWO_PI,
+      ph2: rand() * TWO_PI,
+      am: 8 + rand() * 9,          // per-motor flutter (Hz)
+      amPh: rand() * TWO_PI,
+    });
+  }
+  let lp = 0, lp2 = 0;
+  const aAir = lpCoef(260, sr);
+  const aWash = lpCoef(900, sr);
+  // slow loudness undulation (the swarm leaning into a maneuver) — integer
+  // cycles over the loop so the seam doesn't jump
+  const swellHz = 2 / dur;
+
+  for (let i = 0; i < N; i++) {
+    const t = i / sr;
+    let tone = 0;
+    for (const p of partials) {
+      const am = 1 + 0.22 * Math.sin(TWO_PI * p.am * t + p.amPh);
+      tone += p.a * am * (
+        Math.sin(TWO_PI * p.f * t + p.ph)
+        + 0.35 * Math.sin(TWO_PI * p.f * 2 * t + p.ph2)
+      );
+    }
+    const x = rand() * 2 - 1;
+    lp = aAir * lp + (1 - aAir) * x;      // deep air body
+    lp2 = aWash * lp2 + (1 - aWash) * x;  // prop-wash hiss band
+    const swell = 0.75 + 0.25 * Math.sin(TWO_PI * swellHz * t + 1.3);
+    M[i] = (tone * 0.055 + lp * 1.1 + (lp2 - lp) * 0.35) * swell;
+  }
+  M = makeSeamless(M, sr, 0.7);
+  normalize([M], 0.42);
+  return toBuffer(ctx, [M], sr);
+}
+
+// ---------------------------------------------------------------------------
 // Desert night wind — barely-there ambience bed (seamless loop).
 // Deliberately aperiodic: sinusoidal amplitude swells read as ocean surf, so
 // gusts come from a slow random walk instead, with a faintly whistling

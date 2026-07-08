@@ -11,6 +11,7 @@ import {
   renderFountainLoop, renderPinwheelLoop, renderShot, renderTorchLoop,
   renderWindLoop, renderThud, renderTick, renderDesertIR,
   renderFirecrackerLoop, renderCrackerPop, renderWaterfallLoop,
+  renderDroneSwarmLoop,
 } from './synth.js';
 
 const SPEED_OF_SOUND = 340;
@@ -107,6 +108,7 @@ export class AudioEngine {
     variants('firecrackers', 2, (s) => renderFirecrackerLoop(ctx, s));
     variants('cracker', 4, (s) => renderCrackerPop(ctx, s));
     variants('waterfall', 2, (s) => renderWaterfallLoop(ctx, s));
+    variants('droneswarm', 2, (s) => renderDroneSwarmLoop(ctx, s));
     variants('torch', 1, (s) => renderTorchLoop(ctx, s));
     variants('wind', 1, (s) => renderWindLoop(ctx, s));
     variants('thud', 2, (s) => renderThud(ctx, s));

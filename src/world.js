@@ -6,6 +6,7 @@ import * as THREE from 'three';
 import { createTerrain, terrainHeight, terrainNormal } from './terrain.js';
 import { createSky, createNightEnvMap, MOON_DIR } from './sky.js';
 import { FinaleShow } from './show.js';
+import { DroneShow, DRONE_COUNT } from './drones.js';
 import { mulberry32, randRange, clamp } from './utils.js';
 
 const WOOD = 0x6b5236;
@@ -424,6 +425,214 @@ export class Detonator {
 }
 
 // ---------------------------------------------------------------------------
+// The drone show console — a field kiosk off the west side of camp: tilted
+// control head on a steel post, whip antenna, a little status screen, and
+// one big green LAUNCH button. Touch the button (VR) or click the console
+// (desktop) and 840 drones lift off from a pad out in the dunes. Pressing
+// again mid-show skips to the next formation; it re-arms once the swarm is
+// back on the ground.
+
+function droneLabelTexture() {
+  const c = document.createElement('canvas');
+  c.width = 256; c.height = 200;
+  const g = c.getContext('2d');
+  g.fillStyle = '#1c2624';
+  g.fillRect(0, 0, 256, 200);
+  g.strokeStyle = '#4de0b8';
+  g.lineWidth = 4;
+  g.strokeRect(7, 7, 242, 186);
+  // top strip stays clear: the status screen mesh sits over it
+  g.fillStyle = '#c9f2e4';
+  g.font = 'bold 33px Georgia, serif';
+  g.textAlign = 'center';
+  g.fillText('DRONE SHOW', 128, 108);
+  g.font = '18px Georgia, serif';
+  g.fillStyle = '#7fd8bc';
+  g.fillText(`swarm control · ${DRONE_COUNT} uas`, 128, 138);
+  g.font = '16px Georgia, serif';
+  g.fillStyle = '#5aa88f';
+  g.fillText('— press to launch —', 128, 188);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+export class DroneConsole {
+  constructor(scene, audio) {
+    this.audio = audio;
+    this.armed = true;
+    this.onLaunch = null;
+    this.onSkip = null;
+    this._cooldown = 0;
+    this._touchLatch = false;
+    this._touchedThisFrame = false;
+
+    const root = new THREE.Group();
+    this.root = root;
+
+    const steel = new THREE.MeshStandardMaterial({
+      color: 0x39424a, roughness: 0.45, metalness: 0.75, envMapIntensity: 0.8,
+    });
+    const shell = new THREE.MeshStandardMaterial({
+      color: 0x24312c, roughness: 0.55, metalness: 0.35, envMapIntensity: 0.6,
+    });
+
+    const post = new THREE.Mesh(new THREE.CylinderGeometry(0.024, 0.03, 0.95, 8), steel);
+    post.position.y = 0.475;
+    post.castShadow = true;
+    root.add(post);
+
+    // tilted control head; the label rides the top face, angled at the player
+    const head = new THREE.Group();
+    head.position.y = 0.98;
+    head.rotation.x = 0.62;
+    root.add(head);
+    const labelTex = droneLabelTexture();
+    const box = new THREE.Mesh(
+      new THREE.BoxGeometry(0.42, 0.05, 0.32),
+      [shell, shell,
+        new THREE.MeshStandardMaterial({
+          map: labelTex, roughness: 0.6, envMapIntensity: 0.5,
+          // same night-readability trick as the detonator's DANGER plate
+          emissive: 0xffffff, emissiveMap: labelTex, emissiveIntensity: 0.3,
+        }),
+        shell, shell, shell],
+    );
+    box.castShadow = true;
+    head.add(box);
+
+    // status screen (upper half of the head)
+    this._screenCanvas = document.createElement('canvas');
+    this._screenCanvas.width = 192;
+    this._screenCanvas.height = 64;
+    this._screenTex = new THREE.CanvasTexture(this._screenCanvas);
+    this._screenTex.colorSpace = THREE.SRGBColorSpace;
+    const screen = new THREE.Mesh(
+      new THREE.PlaneGeometry(0.2, 0.066),
+      new THREE.MeshBasicMaterial({ map: this._screenTex }),
+    );
+    screen.rotation.x = -Math.PI / 2;
+    screen.position.set(0, 0.0265, -0.095);
+    head.add(screen);
+    this.setStatus('READY');
+
+    // the big green button, low on the head where a palm lands naturally
+    this.buttonMat = new THREE.MeshStandardMaterial({
+      color: 0x0d3321, roughness: 0.3, metalness: 0.1,
+      emissive: 0x25e070, emissiveIntensity: 0.7, envMapIntensity: 0.8,
+    });
+    const bezel = new THREE.Mesh(new THREE.CylinderGeometry(0.052, 0.058, 0.016, 16), steel);
+    bezel.position.set(0, 0.028, 0.085);
+    head.add(bezel);
+    this.button = new THREE.Mesh(new THREE.SphereGeometry(0.042, 16, 10), this.buttonMat);
+    this.button.scale.y = 0.55;
+    this.button.position.set(0, 0.036, 0.085);
+    head.add(this.button);
+
+    // whip antenna with a status LED at the tip
+    const antenna = new THREE.Mesh(new THREE.CylinderGeometry(0.005, 0.008, 0.52, 5), steel);
+    antenna.position.set(-0.17, 1.24, -0.1);
+    antenna.rotation.z = 0.1;
+    root.add(antenna);
+    this.lampMat = new THREE.MeshBasicMaterial({ color: 0x30ff90 });
+    const lamp = new THREE.Mesh(new THREE.SphereGeometry(0.011, 8, 6), this.lampMat);
+    lamp.position.set(-0.196, 1.5, -0.1);
+    root.add(lamp);
+
+    scene.add(root);
+    this._pos = new THREE.Vector3();
+    this._lampT = 0;
+  }
+
+  setStatus(text) {
+    if (text === this._status) return;
+    this._status = text;
+    const g = this._screenCanvas.getContext('2d');
+    g.fillStyle = '#03110b';
+    g.fillRect(0, 0, 192, 64);
+    g.strokeStyle = '#0f4030';
+    g.lineWidth = 2;
+    g.strokeRect(2, 2, 188, 60);
+    g.fillStyle = '#63ffbe';
+    g.font = 'bold 26px monospace';
+    g.textAlign = 'center';
+    g.textBaseline = 'middle';
+    g.fillText(text, 96, 34);
+    this._screenTex.needsUpdate = true;
+  }
+
+  buttonWorldPos(out = this._pos) {
+    return this.button.getWorldPosition(out);
+  }
+
+  /** Distance to the center-screen aim hit, or null if not aimed at. */
+  aimDistance(raycaster, camera) {
+    raycaster.setFromCamera({ x: 0, y: 0 }, camera);
+    const hit = raycaster.intersectObject(this.root, true);
+    return hit.length > 0 && hit[0].distance < 4 ? hit[0].distance : null;
+  }
+
+  /** VR: a hand physically on the button presses it (edge-triggered). */
+  tryTouch(handPos, hand = null) {
+    if (this.buttonWorldPos().distanceTo(handPos) > 0.09) return;
+    this._touchedThisFrame = true;
+    if (this._touchLatch) return;
+    this._touchLatch = true;
+    this._press(hand);
+  }
+
+  /** Desktop: click the console. */
+  autoPress() {
+    this._press(null);
+  }
+
+  _press(hand) {
+    if (this._cooldown > 0) return;
+    this._cooldown = 1.2;
+    hand?.pulse?.(0.6, 60);
+    const p = this.buttonWorldPos();
+    this.audio.play('tick', p, { gain: 0.8, refDistance: 0.8, rate: 1.5 });
+    if (this.armed) {
+      this.armed = false;
+      // little ascending confirm chirps — mission control in three notes
+      setTimeout(() => this.audio.play('tick', p, { gain: 0.6, refDistance: 0.8, rate: 1.9 }), 140);
+      setTimeout(() => this.audio.play('tick', p, { gain: 0.6, refDistance: 0.8, rate: 2.4 }), 280);
+      this.onLaunch?.();
+    } else {
+      this.onSkip?.();
+    }
+  }
+
+  /** The swarm is back on the pad; the console goes green again. */
+  rearm() {
+    this.armed = true;
+    this.setStatus('READY');
+  }
+
+  update(dt) {
+    this._cooldown = Math.max(0, this._cooldown - dt);
+    if (!this._touchedThisFrame) this._touchLatch = false;
+    this._touchedThisFrame = false;
+    this._lampT += dt;
+    if (this.armed) {
+      // slow green breathing on button and lamp: powered and waiting
+      const b = 0.55 + 0.35 * Math.sin(this._lampT * 2.1);
+      this.buttonMat.emissiveIntensity = b;
+      const l = Math.sin(this._lampT * 3.4) > 0 ? 1 : 0.15;
+      this.lampMat.color.setRGB(l * 0.2, l, l * 0.55);
+    } else {
+      // busy: amber button, quick amber blips on the antenna (telemetry)
+      this.buttonMat.emissiveIntensity = 0.5;
+      this.buttonMat.emissive.setHex(0xe0a020);
+      const l = Math.sin(this._lampT * 9) > 0.55 ? 1 : 0.1;
+      this.lampMat.color.setRGB(l, l * 0.6, l * 0.1);
+      return;
+    }
+    this.buttonMat.emissive.setHex(0x25e070);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Crate + restocking
 
 export class Restocker {
@@ -797,6 +1006,18 @@ export function createWorld(scene, fireworks, pool, audio) {
   detonator.onFire = () => show.start(detonator.wireCurve);
   show.onEnd = () => detonator.rearm();
 
+  // the drone show: swarm staged NW over the dunes, console off the west
+  // side of camp mirroring the detonator on the east
+  const droneShow = new DroneShow(scene, audio, terrainHeight);
+  const droneConsole = new DroneConsole(scene, audio);
+  droneConsole.root.position.set(-3.6, terrainHeight(-3.6, 1.2), 1.2);
+  droneConsole.root.rotation.y = 1.82; // head tilted toward the campsite
+  scene.add(contactShadow(-3.6, 1.2, 0.3, 0.26, 0.45));
+  droneConsole.onLaunch = () => droneShow.start();
+  droneConsole.onSkip = () => droneShow.skip();
+  droneShow.onEnd = () => droneConsole.rearm();
+  droneShow.onScene = (label) => droneConsole.setStatus(label);
+
   return {
     sky,
     torch,
@@ -804,6 +1025,8 @@ export function createWorld(scene, fireworks, pool, audio) {
     lanternLight,
     detonator,
     show,
+    droneShow,
+    droneConsole,
     exitBoard: exit.board,
     update(dt, time) {
       sky.update(dt, time);
@@ -811,6 +1034,8 @@ export function createWorld(scene, fireworks, pool, audio) {
       torch.update(dt, time, terrainHeight);
       detonator.update(dt);
       show.update(dt, time);
+      droneConsole.update(dt);
+      droneShow.update(dt, time);
       lanternLight.intensity = 5.4 + Math.sin(time * 11) * 0.5 + Math.sin(time * 5.1) * 0.3;
       // bursts overhead wash the whole basin: the hemisphere light briefly
       // brightens and tints toward the shell color, so distant dunes and the
