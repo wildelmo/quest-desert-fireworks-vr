@@ -230,6 +230,15 @@ export class Interactions {
     const flamePos = torch.flameWorldPos(_v3);
     const holderHand = this.hands.find((h) => h.held === torch) ?? null;
     this.tryIgniteNear(flamePos, holderHand);
+
+    // the drone console's launch button is a plain touch surface: push a
+    // hand into it — no grip needed (the console itself handles debounce)
+    const dcon = this.world.droneConsole;
+    if (dcon) {
+      for (const h of this.hands) {
+        if (h.gamepad) dcon.tryTouch(h.grip.getWorldPosition(_v1), h);
+      }
+    }
   }
 }
 
@@ -530,6 +539,15 @@ export class DesktopControls {
           return;
         }
       }
+      // same deal for the drone console
+      const dconDist = ix.world.droneConsole?.aimDistance(this.raycaster, ix.camera);
+      if (dconDist != null) {
+        const hit = this.aimHit();
+        if (!(hit?.item && hit.distance < dconDist)) {
+          ix.world.droneConsole.autoPress();
+          return;
+        }
+      }
     }
     if (this.held && !this.held.isTorch) {
       // a rocket already firing in your grip can't be click-planted across
@@ -622,6 +640,11 @@ export class DesktopControls {
       else if (this.aimingAtExit()) msg = 'Click — exit to menu';
       else if (this.ix.world.detonator?.aimDistance(this.raycaster, this.ix.camera) != null) {
         msg = this.ix.world.detonator.armed ? '💥 Click — PLUNGE (grand finale)' : 'the finale is running…';
+      } else if (this.ix.world.droneConsole?.aimDistance(this.raycaster, this.ix.camera) != null) {
+        const ds = this.ix.world.droneShow;
+        if (this.ix.world.droneConsole.armed) msg = '🛸 Click — launch the drone show';
+        else if (ds?.running && !ds.scenes[ds.sceneIndex]?.land) msg = `drones: ${ds.sceneLabel} — click to skip ahead`;
+        else msg = 'the swarm is landing…';
       } else {
         const hit = this.aimHit();
         if (hit?.item) msg = hit.item.isTorch ? 'E — take the torch' : `E — grab ${hit.item.type.label}`;

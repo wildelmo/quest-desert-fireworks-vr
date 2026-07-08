@@ -52,6 +52,7 @@ const files = await page.evaluate(async (wanted) => {
     firecrackers: (s) => synth.renderFirecrackerLoop(ctx, s),
     cracker: (s) => synth.renderCrackerPop(ctx, s),
     waterfall: (s) => synth.renderWaterfallLoop(ctx, s),
+    droneswarm: (s) => synth.renderDroneSwarmLoop(ctx, s),
     fountain: (s) => synth.renderFountainLoop(ctx, s),
     torch: (s) => synth.renderTorchLoop(ctx, s),
     wind: (s) => synth.renderWindLoop(ctx, s),

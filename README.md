@@ -37,6 +37,28 @@ of horsetail shells breaking in unison so their striated silver trails pour down
 in sheets, frying-metal sizzle and all — then an escalating barrage and a salute chain
 to close. The handle springs back up when the desert goes quiet, ready to go again.
 
+## The drone show
+
+Off to the **left** of camp stands a field console on a steel post — teal-bordered
+control head, whip antenna, a little status screen, one big green button. Press it
+(touch it with either hand in VR; click it on desktop) and **840 LED drones** wake up
+on a staging pad out in the western dunes and climb into the night in a rolling wave.
+
+It's the anti-firework: silent (just a faint motor hum on the wind), slow, deliberate,
+nothing explodes. The swarm spends about three and a half minutes morphing through a
+program of formations — a glowing amber wall, a rotating **teal-to-violet sphere**, a
+turning **DNA helix**, a monumental **saguaro** with blossom crowns, a beating
+**heart**, a frozen **starburst** (one firework that never fades, as a courtesy to the
+hosts), a **crescent moon and star**, and a closing **GOOD NIGHT** written across the
+sky — then settles back onto the pad in columns and goes dark. The morphs are the
+point: drones peel off in waves, cruise on slow arcs, and arrive together as the next
+shape blooms, while colors ripple and sweep through the formation per-LED.
+
+The console's screen tracks the current formation. Pressing the button mid-show
+**skips to the next formation**; it re-arms once the swarm lands. And yes — the
+detonator and the drone console can absolutely run at the same time. The drones are
+insured. Probably.
+
 ## Play it
 
 ### On the Quest (the real thing)
@@ -119,6 +141,13 @@ To audition any recipe without a headset: `node tools/render-sounds.mjs out whoo
 - Burst flash lights are pooled `PointLight`s that paint the dunes with the shell's
   color (fountain lights are pooled too — changing the scene's light count mid-show
   forces a shader recompile hitch on Quest, so the light count never changes).
+- The drone show (`src/drones.js`) renders all 840 LEDs as **one additive `Points`
+  draw call**; the CPU flies the swarm with a per-drone spring-damper autopilot
+  (retargeting matches drones to formation slots by height-band rank, then staggers
+  departures so morphs flow instead of snapping). Formations are procedural point
+  clouds — parametric solids, capsule strokes, and canvas-sampled text — in a frame
+  that faces the campsite. The distant swarm hum is synthesized like everything else:
+  a beating cluster of detuned motor tones over prop-wash noise.
 - `tools/screenshot.mjs` is a headless QA harness (Playwright + SwiftShader) that loads
   the demo, verifies zero console errors, and captures screenshots.
 
