@@ -67,7 +67,7 @@ function starSprite() {
 
 // Milky-way great circle: tilted band (shared by the star scatter and the
 // haze glow so they stay aligned)
-const BAND_NORMAL = new THREE.Vector3(0.55, 0.55, 0.35).normalize();
+const BAND_NORMAL = new THREE.Vector3(0.75, 0.25, 0.6).normalize();
 
 function createStars() {
   const rand = mulberry32(1234);
@@ -173,12 +173,11 @@ function createStars() {
   return points;
 }
 
-// The Milky Way as cloudy interstellar structure, not just extra star dots:
-// a full equirect overlay baked once at startup — gaussian band around the
-// great circle, fBm star-cloud knots stretched along it, and a dark dust
-// rift snaking down the core (the Great Rift). Baked to a CanvasTexture
-// because per-fragment fBm every frame is Quest budget we don't have.
-function createMilkyWayDome(bandNormal) {
+// Fallback texture if the Gaia photo fails to load (e.g. offline dev server
+// missing assets): the old procedural bake — gaussian band, fBm star-cloud
+// knots, a dark dust rift. It reads more "silver cloud" than galaxy, which
+// is why the real photograph below replaced it as the primary source.
+function bakeMilkyWayTexture(bandNormal) {
   const W = 768, H = 384;
 
   // seeded value noise on a hashed integer lattice
@@ -264,14 +263,61 @@ function createMilkyWayDome(bandNormal) {
 
   const tex = new THREE.CanvasTexture(c);
   tex.colorSpace = THREE.SRGBColorSpace;
-  const mat = new THREE.MeshBasicMaterial({
-    map: tex, side: THREE.BackSide, blending: THREE.AdditiveBlending,
-    transparent: true, depthWrite: false, fog: false,
-  });
-  const mesh = new THREE.Mesh(new THREE.SphereGeometry(SKY_RADIUS * 0.99, 48, 24), mat);
-  mesh.renderOrder = -9.5; // over the dome, under the star points
-  mesh.frustumCulled = false;
-  return mesh;
+  return tex;
+}
+
+// Where the galactic core should hang in the scene: ahead of the default
+// view and to the right, ~30 degrees up — clear of the moon, over the show.
+const CORE_DIR = new THREE.Vector3(0.4, 0.5, -0.75).normalize();
+
+// The Milky Way itself: ESA Gaia's all-sky map — an actual image of the
+// night sky assembled from ~1.8 billion measured stars — laid over the
+// gradient dome additively, so black sky adds nothing and the band, the
+// Great Rift dust lanes and the Magellanic Clouds come through for real.
+function createMilkyWay(bandNormal) {
+  const group = new THREE.Group();
+
+  const makeDome = (tex) => {
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.anisotropy = 4;
+    const mat = new THREE.MeshBasicMaterial({
+      map: tex, side: THREE.BackSide, blending: THREE.AdditiveBlending,
+      transparent: true, depthWrite: false, fog: false,
+    });
+    const mesh = new THREE.Mesh(new THREE.SphereGeometry(SKY_RADIUS * 0.99, 48, 24), mat);
+    mesh.renderOrder = -9.5; // over the dome, under the star points
+    mesh.frustumCulled = false;
+    return mesh;
+  };
+
+  new THREE.TextureLoader().load(
+    'assets/textures/milkyway_gaia_4k.jpg',
+    (tex) => {
+      const mesh = makeDome(tex);
+      // dimmed so the band whispers behind the star points, not aurora-loud
+      mesh.material.color.setScalar(0.42);
+      // the photo is equirect in galactic coordinates, so its equator IS the
+      // Milky Way; tip the sphere's pole onto the band normal shared with
+      // the star scatter so both layers trace the same great circle
+      mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), bandNormal);
+      // then spin about that pole to park the galactic core (texture center,
+      // which SphereGeometry maps to local +x) at the band point nearest
+      // CORE_DIR
+      const coreNow = new THREE.Vector3(1, 0, 0).applyQuaternion(mesh.quaternion);
+      const target = CORE_DIR.clone()
+        .addScaledVector(bandNormal, -CORE_DIR.dot(bandNormal)).normalize();
+      const spin = Math.atan2(
+        new THREE.Vector3().crossVectors(coreNow, target).dot(bandNormal),
+        coreNow.dot(target),
+      );
+      mesh.rotateY(spin);
+      group.add(mesh);
+    },
+    undefined,
+    () => { group.add(makeDome(bakeMilkyWayTexture(bandNormal))); },
+  );
+
+  return group;
 }
 
 function moonTexture() {
@@ -525,7 +571,7 @@ export function createSky(scene) {
   const stars = createStars();
   const moon = createMoon();
   const mountains = createMountains();
-  const haze = createMilkyWayDome(BAND_NORMAL);
+  const haze = createMilkyWay(BAND_NORMAL);
   scene.add(dome, stars, haze, moon, mountains);
   const shooters = [new ShootingStar(scene), new ShootingStar(scene)];
 
