@@ -1,21 +1,25 @@
 // Fireworks gameplay: the items you hold and plant, burning fuses, rocket
-// flight, and the shell-burst choreography (peony, willow, palm, ring,
-// crossette, crackle, strobe, serpents, brocade, multi-break) drawn through
-// the GPU particle pool. Also owns the pooled flash lights that slam the
-// terrain with color on every burst.
+// flight, and the shell-burst choreography (peony, dahlia, chrysanthemum,
+// willow, palm, ring, crossette, crackle, strobe, serpents, brocade,
+// multi-break) drawn through the GPU particle pool. Also owns the pooled
+// flash lights that slam the terrain with color on every burst.
 
 import * as THREE from 'three';
 import { randRange, randPick, clamp } from './utils.js';
 
+// Colorways matched to a classic display photo: a huge amber-gold
+// chrysanthemum, scarlet shells with pale pink tips, teal/aqua shells (one
+// breaking over a warm ember core), royal violet — plus gold and silver for
+// brocade/glitter work. a = the shell's stars, b = tips/pistil/accents.
 export const PALETTES = [
+  { name: 'golden brocade', a: 0xffab42, b: 0xffe9b0 },
+  { name: 'scarlet pink', a: 0xff2430, b: 0xff8fae },
+  { name: 'oasis teal', a: 0x1fe8c6, b: 0xa9fff2 },
+  { name: 'teal ember', a: 0x25e0b4, b: 0xff8632 },
+  { name: 'royal violet', a: 0xa14fff, b: 0xff5ad2 },
   { name: 'crimson gold', a: 0xff4033, b: 0xffb347 },
-  { name: 'electric violet', a: 0x9a63ff, b: 0xff5bd8 },
-  { name: 'emerald', a: 0x2eff8f, b: 0xc8ffdf },
-  { name: 'sapphire', a: 0x3f7fff, b: 0xa8d4ff },
   { name: 'pure gold', a: 0xffc04d, b: 0xfff2bb },
   { name: 'silver', a: 0xeef2ff, b: 0xcfd8ff },
-  { name: 'sunset', a: 0xff7a1a, b: 0xff3b6b },
-  { name: 'aqua rose', a: 0x37f2e6, b: 0xff6fae },
 ];
 
 export const ITEM_TYPES = {
@@ -23,28 +27,30 @@ export const ITEM_TYPES = {
     kind: 'rocket', label: 'Bottle Rocket',
     bodyR: 0.018, bodyLen: 0.11, stickLen: 0.55,
     size: 0.32, fuseTime: 2.0, thrust: 46, burnTime: 0.85, coast: 1.15,
-    shells: ['peony', 'ring', 'crackle', 'strobe'],
+    shells: ['peony', 'dahlia', 'ring', 'crackle', 'strobe'],
     weight: 3,
   },
   rocketMed: {
     kind: 'rocket', label: 'Sky Rocket',
     bodyR: 0.028, bodyLen: 0.17, stickLen: 0.72,
     size: 0.6, fuseTime: 2.6, thrust: 42, burnTime: 1.4, coast: 1.5,
-    shells: ['peony', 'chrys', 'willow', 'ring', 'crossette', 'crackle', 'serpents'],
+    shells: ['peony', 'dahlia', 'chrys', 'willow', 'ring', 'crossette', 'crackle', 'serpents'],
     weight: 3,
   },
   rocketLarge: {
     kind: 'rocket', label: 'Mammoth Rocket',
     bodyR: 0.042, bodyLen: 0.26, stickLen: 0.92,
     size: 1.3, fuseTime: 3.2, thrust: 43, burnTime: 2.1, coast: 2.2,
-    shells: ['peony', 'chrys', 'willow', 'palm', 'crossette', 'brocade', 'serpents', 'multibreak'],
+    shells: ['peony', 'dahlia', 'chrys', 'willow', 'palm', 'crossette', 'brocade', 'serpents', 'multibreak'],
     weight: 2,
   },
   rocketGrand: {
     kind: 'rocket', label: 'Grand Shell Rocket',
     bodyR: 0.058, bodyLen: 0.36, stickLen: 1.14,
     size: 1.8, fuseTime: 3.6, thrust: 45, burnTime: 2.45, coast: 2.45,
-    shells: ['peony', 'chrys', 'willow', 'palm', 'brocade', 'serpents', 'multibreak'],
+    // dahlia twice: the grand shells are the display pieces, and the
+    // long-ray dahlia is the postcard look they exist for
+    shells: ['peony', 'dahlia', 'dahlia', 'chrys', 'willow', 'palm', 'brocade', 'serpents', 'multibreak'],
     weight: 2,
   },
   fountain: {
@@ -1250,7 +1256,7 @@ export class FireworksSystem {
     const vel = dir.clone().multiplyScalar(speed);
     const col = new THREE.Color(item.palette.a);
     const flightT = isFinale ? 3.0 : randRange(2.3, 2.7);
-    const pattern = isFinale ? randPick(['multibreak', 'palm', 'chrys', 'brocade', 'serpents']) : randPick(['peony', 'ring', 'crackle', 'strobe', 'willow', 'serpents']);
+    const pattern = isFinale ? randPick(['multibreak', 'palm', 'dahlia', 'chrys', 'brocade', 'serpents']) : randPick(['peony', 'dahlia', 'ring', 'crackle', 'strobe', 'willow', 'serpents']);
     this._fireShot(muzzle, vel, col, 1.35, {
       gravity: 0.9, drag: 0.35, flightT,
       onBurst: (p, v) => this.burst(p, {
@@ -1567,7 +1573,10 @@ export class FireworksSystem {
           if (opts.flatten) dy *= opts.flatten; // pancake the break (waterfall)
           const sp = speed * (opts.shellSkin ? randRange(0.92, 1.0) : randRange(0.35, 1.0));
           const white = Math.random() < (opts.whiteCore ?? 0.08);
-          const c = white ? null : (Math.random() < 0.5 ? colA : colB);
+          const c = white ? null
+            : opts.color === 'a' ? colA
+            : opts.color === 'b' ? colB
+            : (Math.random() < 0.5 ? colA : colB);
           const bright = opts.brightness ?? glow;
           vx = dx * sp + dvx + randRange(-0.5, 0.5);
           vy = dy * sp + dvy + randRange(-0.5, 0.5);
@@ -1591,6 +1600,95 @@ export class FireworksSystem {
       });
     };
 
+    /**
+     * The long-exposure-photo chrysanthemum: stars ride near-uniform radial
+     * rays and shed glowing flakes along the way. Each flake is precomputed
+     * at break time — born at the moment its star passes (birth offset),
+     * placed by the same closed-form ballistics the shader integrates, given
+     * a fraction of the shed velocity and heavy drag so it slides a couple
+     * of meters and then hangs where it was dropped. A flake shed at ts
+     * lives until the head dies, so every ray stays lit from core to tip and
+     * then fades as one — and because outer flakes are younger, each ray is
+     * naturally rim-bright / center-dim, exactly how the real thing reads.
+     * opts.tipSparkle finishes each ray with strobing near-white glitter.
+     * Costs (1 + flakes + 2·tipSparkle) particles per ray.
+     */
+    const spawnRays = (rays, speed, opts = {}) => {
+      const gravity = opts.gravity ?? 0.36;
+      const drag = opts.drag ?? 0.5;
+      const flakes = opts.flakes ?? 22;
+      const tips = opts.tipSparkle ? 2 : 0;
+      const seg1 = 1 + flakes + tips;
+      const bright = opts.brightness ?? glow;
+      const flakeTw = opts.flakeTwinkle ?? 0;
+      const baseLife = opts.life ?? 2.6;
+      const scale = 0.6 + size * 0.7;
+      const d = Math.max(drag, 0.0001);
+      const gAcc = 9.81 * gravity;
+      // per-ray state carried across the ray's flakes (fill runs in order)
+      let j = -1, vx, vy, vz, cr, cg, cb, tr, tg, tb, life;
+      pool.spawn(rays * seg1, (i) => {
+        j++;
+        const seg = j % seg1;
+        if (seg === 0) {
+          // the head star: uniform direction, near-uniform speed — the
+          // photo's bursts are clean spheres of same-length rays
+          const u = Math.random() * 2 - 1;
+          const a = Math.random() * Math.PI * 2;
+          const r = Math.sqrt(1 - u * u);
+          const sp = speed * randRange(0.93, 1.0);
+          vx = r * Math.cos(a) * sp + dvx;
+          vy = u * sp + dvy;
+          vz = r * Math.sin(a) * sp + dvz;
+          cr = colA.r; cg = colA.g; cb = colA.b;
+          // tip tone: the ray color pushed most of the way to white —
+          // pink-white on scarlet, pale gold on amber, mint on teal
+          tr = cr + (1 - cr) * 0.72; tg = cg + (1 - cg) * 0.72; tb = cb + (1 - cb) * 0.72;
+          life = baseLife * randRange(0.9, 1.1);
+          pool.set(i, pos.x, pos.y, pos.z, vx, vy, vz,
+            cr * 5.7 * bright, cg * 5.7 * bright, cb * 5.7 * bright,
+            time, life, (opts.psize ?? 0.21) * randRange(0.85, 1.2) * scale,
+            gravity, drag, 0);
+        } else if (seg <= flakes) {
+          // a flake shed on the way out (jittered even spacing, skipping the
+          // dark core the photo shows around the break point). Flakes keep a
+          // healthy share of the shed velocity with moderate drag, so each
+          // one smears a few meters along the ray — that's what fuses the
+          // beads into the photo's solid lines instead of dotted strings.
+          const f = (seg - 1 + Math.random() * 0.9) / flakes;
+          const ts = life * (0.04 + 0.74 * f);
+          const k = (1 - Math.exp(-d * ts)) / d;
+          const e = Math.exp(-d * ts);
+          const svy = (vy + gAcc / d) * e - gAcc / d; // shed-point velocity
+          // outer flakes tint gently toward the tip tone; the photo's rays
+          // hold saturation nearly to the end. flakeBright is the hue knob:
+          // saturated primaries survive heavy HDR overdrive, but golds have
+          // to stay under ~3x or ACES compresses them to silver-white.
+          const w = f * 0.22 * (opts.flakeTint ?? 1);
+          const fb = (opts.flakeBright ?? 4.4) * (1 - f * 0.2) * bright;
+          pool.set(i,
+            pos.x + vx * k, pos.y + vy * k - gAcc * (ts - k) / d, pos.z + vz * k,
+            vx * e * 0.5 + randRange(-0.5, 0.5), svy * 0.5 + randRange(-0.5, 0.5), vz * e * 0.5 + randRange(-0.5, 0.5),
+            (cr + (tr - cr) * w) * fb, (cg + (tg - cg) * w) * fb, (cb + (tb - cb) * w) * fb,
+            time + ts, (life - ts) * randRange(0.9, 1.12) + 0.3,
+            0.46 * randRange(0.8, 1.3) * scale, 0.08, 1.3, flakeTw);
+        } else {
+          // ray tip: a strobing near-white spark that lands right where the
+          // ray dies — the bright bead ends the photo's rays all carry
+          const ts = life * randRange(0.78, 0.94);
+          const k = (1 - Math.exp(-d * ts)) / d;
+          const e = Math.exp(-d * ts);
+          const svy = (vy + gAcc / d) * e - gAcc / d;
+          pool.set(i,
+            pos.x + vx * k, pos.y + vy * k - gAcc * (ts - k) / d, pos.z + vz * k,
+            vx * e * 0.5 + randRange(-0.6, 0.6), svy * 0.5 + randRange(-0.6, 0.6), vz * e * 0.5 + randRange(-0.6, 0.6),
+            tr * 7.2 * bright, tg * 7.2 * bright, tb * 7.2 * bright,
+            time + ts, randRange(0.45, 0.85),
+            0.24 * randRange(0.8, 1.25) * scale, 0.15, 1.2, 24);
+        }
+      });
+    };
+
     const grand = Math.max(0, size - 0.75);
     const grandCount = 1 + grand * 0.65;
     const grandLife = 1 + grand * 0.45;
@@ -1607,10 +1705,34 @@ export class FireworksSystem {
         spawnSphere(Math.round((120 + 230 * size) * grandCount), 7 + 8 * size, { life: 1.6 * grandLife, psize: 0.13 * grandPSize, drag: slowGrandDrag(0.7) });
         break;
 
-      case 'chrys': // golden twinkling sphere with lingering glitter trails
-        spawnSphere(Math.round((280 + 570 * size) * grandCount), wideGrandSpeed(11 + 13 * size), {
-          shellSkin: true, life: (2.8 + 1.1 * size) * grandLife, drag: slowGrandDrag(0.55), gravity: 0.4, twinkle: 26, psize: 0.16 * grandPSize,
-          trail: 3,
+      case 'dahlia': {
+        // The postcard shell: saturated single-color rays held lit from core
+        // to tip, near-white sparkle at every ray end, breaking over a loose
+        // pistil core in the palette's accent color (teal over ember, scarlet
+        // over pink, violet over magenta…).
+        const rays = spec.count ?? Math.min(300, Math.round(100 + 115 * size + 50 * grand));
+        const speed = spec.speed ?? wideGrandSpeed(11.5 + 12.5 * size);
+        spawnRays(rays, speed, {
+          life: (2.5 + size) * grandLife, drag: slowGrandDrag(0.52), gravity: 0.34,
+          flakes: Math.round(20 + 11 * Math.min(size, 1.6)), tipSparkle: true,
+          psize: 0.21 * grandPSize,
+        });
+        // the pistil rides dimmer than the rays on purpose: overdriving warm
+        // accent colors would ACES-compress them to white, and the photo's
+        // cores are unmistakably orange/pink — density carries the punch
+        spawnSphere(Math.round((150 + 190 * size) * grandCount), speed * 0.42, {
+          color: 'b', life: 2.2 * grandLife, drag: 0.75, gravity: 0.3,
+          psize: 0.34 * grandPSize, trail: 1, whiteCore: 0.02, brightness: glow * 0.75,
+        });
+        break;
+      }
+
+      case 'chrys': // brocade-crown chrysanthemum: dense hanging glitter rays
+        spawnRays(Math.min(340, Math.round(110 + 120 * size + 48 * grand)), wideGrandSpeed(11 + 13 * size), {
+          life: (2.9 + 1.1 * size) * grandLife, drag: slowGrandDrag(0.48), gravity: 0.45,
+          flakes: Math.round(22 + 11 * Math.min(size, 1.6)), tipSparkle: true,
+          flakeTwinkle: 15, psize: 0.17 * grandPSize,
+          flakeBright: 2.6, flakeTint: 0.4, // hold the amber — see spawnRays
         });
         break;
 
@@ -1833,7 +1955,7 @@ export class FireworksSystem {
         const pal2 = randPick(PALETTES);
         this.schedule(0.5, () => {
           this.burst(_v1.copy(pos).add(_v2.set(randRange(-10, 10), randRange(-2, 7), randRange(-10, 10))).clone(), {
-            pattern: randPick(['ring', 'serpents']), size: size * 0.78, palette: pal2, sound: 'med',
+            pattern: randPick(['ring', 'dahlia', 'serpents']), size: size * 0.78, palette: pal2, sound: 'med',
           });
         });
         this.schedule(1.0, () => {
@@ -1848,8 +1970,11 @@ export class FireworksSystem {
     // sparkle pass: a halo of strobing white-hot glitter dust threaded
     // through every real break. Patterns built around twinkle already carry
     // their own; this gives the smooth ones (peony, willow, palm, ring…)
-    // the same crackling life without changing their silhouette.
-    const selfTwinkling = pattern === 'chrys' || pattern === 'crackle' || pattern === 'strobe';
+    // the same crackling life without changing their silhouette. The dahlia
+    // sits this out too — white dust inside it would dilute the saturated
+    // rays that ARE the look, and its ray tips already sparkle.
+    const selfTwinkling = pattern === 'chrys' || pattern === 'crackle' || pattern === 'strobe'
+      || pattern === 'dahlia';
     if (!selfTwinkling && size >= 0.4) {
       spawnSphere(Math.round((140 + 300 * size) * grandCount), wideGrandSpeed(9 + 11 * size), {
         life: (2.3 + size * 0.9) * grandLife, drag: slowGrandDrag(0.75), gravity: 0.32,
