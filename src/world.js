@@ -7,6 +7,7 @@ import { createTerrain, terrainHeight, terrainNormal } from './terrain.js';
 import { createSky, createNightEnvMap, MOON_DIR } from './sky.js';
 import { FinaleShow } from './show.js';
 import { DroneShow, DRONE_COUNT } from './drones.js';
+import { createLounge } from './props.js';
 import { mulberry32, randRange, clamp } from './utils.js';
 
 const WOOD = 0x6b5236;
@@ -1006,6 +1007,9 @@ export function createWorld(scene, fireworks, pool, audio) {
   detonator.onFire = () => show.start(detonator.wireCurve);
   show.onEnd = () => detonator.rearm();
 
+  // the spectator lounge behind spawn — scanned furniture, streams in async
+  const lounge = createLounge(scene, terrainHeight, contactShadow);
+
   // the drone show: swarm staged NW over the dunes, console off the west
   // side of camp mirroring the detonator on the east
   const droneShow = new DroneShow(scene, audio, terrainHeight);
@@ -1036,6 +1040,7 @@ export function createWorld(scene, fireworks, pool, audio) {
       show.update(dt, time);
       droneConsole.update(dt);
       droneShow.update(dt, time);
+      lounge.update(time);
       lanternLight.intensity = 5.4 + Math.sin(time * 11) * 0.5 + Math.sin(time * 5.1) * 0.3;
       // bursts overhead wash the whole basin: the hemisphere light briefly
       // brightens and tints toward the shell color, so distant dunes and the

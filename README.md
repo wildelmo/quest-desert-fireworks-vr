@@ -67,6 +67,23 @@ The console's screen tracks the current formation. Pressing the button mid-show
 detonator and the drone console can absolutely run at the same time. The drones are
 insured. Probably.
 
+## The lounge
+
+![lounge](docs/lounge.png)
+
+Turn around from the crate and there's a little spectator nook waiting behind camp:
+two **zero-gravity loungers** angled at the launch sand, a woven diamond-pattern rug,
+a reclaimed-wood side table with a **candle lantern** flickering on it, a boho pouf,
+and a tall **pyramid patio heater** glowing amber against the night chill. Sit back —
+you built the show, you might as well watch it in comfort.
+
+Unlike everything else in the desert, this furniture is *real*: photorealistic product
+scans from the [Amazon Berkeley Objects dataset](https://amazon-berkeley-objects.s3.us-east-1.amazonaws.com/index.html)
+(CC BY 4.0, courtesy of Amazon.com — see
+[`assets/models/ATTRIBUTION.md`](assets/models/ATTRIBUTION.md)), optimized from ~88 MB
+of 4K-textured glTF down to ~6 MB of WebP-textured, quantized GLBs that stream in
+after first paint.
+
 ## Play it
 
 ### On the Quest (the real thing)
@@ -160,6 +177,11 @@ To audition any recipe without a headset: `node tools/render-sounds.mjs out whoo
   count never changes — same rule as the flash pool). The hum is synthesized like
   everything else: a beating cluster of detuned motor tones over prop-wash noise,
   on an HRTF panner so it audibly crosses overhead during the halo transit.
+- The lounge furniture (`src/props.js`) is the one non-procedural set dressing: seven
+  scanned-product GLBs from the Amazon Berkeley Objects dataset, batch-optimized with
+  glTF-Transform (textures 4096→1024px re-encoded as WebP, meshes quantized) so the
+  whole set costs ~6 MB and ~115k triangles. They load with three's `GLTFLoader`
+  after the world is already up, so first paint never waits on them.
 - `tools/screenshot.mjs` is a headless QA harness (Playwright + SwiftShader) that loads
   the demo, verifies zero console errors, and captures screenshots.
 
@@ -171,4 +193,7 @@ npm start          # http://localhost:8080
 node tools/screenshot.mjs shots   # headless smoke test + screenshots
 ```
 
-MIT licensed. All art and audio are procedural — nothing to attribute, everything to remix.
+MIT licensed. Nearly all art and audio are procedural; the exceptions are credited in
+[`assets/models/ATTRIBUTION.md`](assets/models/ATTRIBUTION.md) (lounge furniture, CC BY 4.0),
+[`assets/textures/README.md`](assets/textures/README.md) (sky and moon imagery) and
+[`assets/sounds/LICENSE.txt`](assets/sounds/LICENSE.txt) (two CC0 explosion recordings).
