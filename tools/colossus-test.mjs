@@ -50,12 +50,22 @@ const r = await page.evaluate(async () => {
   const sp = col.forceSalute();
   out.saluteFired = !!sp && sp.y > col.group.position.y + 10;
 
-  // ---- 4) drivers die -> it freewheels (keeps turning, no drive) ----
+  // ---- 4) drivers die -> it freewheels (keeps turning; only the residual
+  // burn/throttle tails add a whisker of drive while they die off) ----
   col.forcePhase('dark');
   await waitGame(8);
   const s2 = col.state;
   out.driversOut = col.pods.every((p) => p.target === 0);
-  out.freewheeling = s2.omega > 0.01 && s2.omega <= s1.omega + 0.05;
+  out.freewheeling = s2.omega > 0.01 && s2.omega <= s1.omega + 0.15;
+
+  // ---- 4b) overdrive: at full throttle it winds up to a genuine rip and
+  // the rim smears into a hoop of light ----
+  col.forcePhase('glory');
+  col.forceOverdrive(1);
+  await waitGame(14);
+  const s3 = col.state;
+  out.overdriveRips = s3.omega > 0.8 && s3.omega < 2.2;
+  out.ringOfLight = col.speedRing.material.opacity > 0.05;
 
   // ---- 5) it never touches the gameplay items/lottery ----
   out.notAnItem = ![...fireworks.items].some((i) => i.type?.label?.includes('Colossus'));

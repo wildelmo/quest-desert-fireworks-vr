@@ -320,6 +320,14 @@ export class XRHand {
       return;
     }
 
+    // teleport wayposts: grabbing the glowing ring rides it
+    for (const tp of this.ix.world.teleporters ?? []) {
+      if (tp.ringWorldPos(_v2).distanceTo(gripPos) < 0.32) {
+        if (tp.use(this.ix.player, this.ix.camera)) this.pulse(0.8, 140);
+        return;
+      }
+    }
+
     let best = null, bestD = GRAB_RADIUS;
     for (const item of this.ix.grabbables()) {
       const d = grabDistance(item, gripPos);
@@ -471,6 +479,16 @@ export class DesktopControls {
     return hit.length > 0 && hit[0].distance < 4;
   }
 
+  /** The teleport waypost the crosshair rests on (anywhere on the post). */
+  aimedTeleporter() {
+    this.raycaster.setFromCamera({ x: 0, y: 0 }, this.ix.camera);
+    for (const tp of this.ix.world.teleporters ?? []) {
+      const hit = this.raycaster.intersectObject(tp.root, true);
+      if (hit.length > 0 && hit[0].distance < 4.5) return tp;
+    }
+    return null;
+  }
+
   pulse() { /* no haptics on desktop */ }
 
   aimHit() {
@@ -518,6 +536,14 @@ export class DesktopControls {
     if (!this.held && this.aimingAtExit()) {
       ix.onExit?.();
       return;
+    }
+    // teleport wayposts: click one empty-handed to ride its ring
+    if (!this.held) {
+      const tp = this.aimedTeleporter();
+      if (tp) {
+        tp.use(ix.player, ix.camera, (d) => { this.yaw += d; });
+        return;
+      }
     }
     // the detonator: click it and the handle throws itself — unless an
     // item is lying in front of it, in which case the click-grab wins
@@ -619,6 +645,7 @@ export class DesktopControls {
       else if (this.held?.state === 'active' && this.held.type.kind === 'rocket') msg = `${this.held.type.label} — motor burning! E to let it fly`;
       else if (this.held?.type?.kind === 'belt') msg = `${this.held.type.label} — light the dangling end, then click/E to toss it`;
       else if (this.held) msg = `${this.held.type.label} — click the sand to plant · scroll to tilt (${Math.round(this.tilt * 57)}°) · E to drop`;
+      else if (this.aimedTeleporter()) msg = `✨ ${this.aimedTeleporter().hint}`;
       else if (this.aimingAtExit()) msg = 'Click — exit to menu';
       else if (this.ix.world.detonator?.aimDistance(this.raycaster, this.ix.camera) != null) {
         msg = this.ix.world.detonator.armed ? '💥 Click — PLUNGE (grand finale)' : 'the finale is running…';
