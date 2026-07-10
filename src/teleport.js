@@ -1,8 +1,13 @@
-// Teleport wayposts: a wooden post with a glowing brass ring swinging from
-// its arm. Grab the ring (VR) or click it (desktop) and it whisks you across
-// the desert in a flash of gold — out to the Colossus's feet, and back home
-// to camp. The 280 m is real and walkable (the distance is the point), but
-// nobody should have to make the pilgrimage twice.
+// Teleport rings: a glowing brass pull-ring on a rope. Grab it (VR) or click
+// it (desktop) and it whisks you across the desert in a flash of gold — out
+// to the Colossus's feet, and back home to camp. The 280 m is real and
+// walkable (the distance is the point), but nobody should have to make the
+// pilgrimage twice.
+//
+// TeleportRing is just the rope + ring + magic, and hangs off any parent
+// (the Colossus trailhead sign carries one under its board). TeleportStation
+// is a free-standing waypost that exists to hold a ring where there's no
+// sign to borrow.
 
 import * as THREE from 'three';
 import { terrainHeight } from './terrain.js';
@@ -59,71 +64,35 @@ function boardTexture(title, sub1, sub2) {
   return tex;
 }
 
-export class TeleportStation {
+export class TeleportRing {
   /**
-   * position/faceTarget: where the post stands and what its board faces.
-   * dest/destFace: where the rider's head lands (XZ) and what they face
-   * on arrival — you always come out of the flash looking at the payoff.
+   * parent: any Object3D the rope ties onto (a sign, a waypost arm).
+   * attach: the local point in `parent` the rope hangs from; drop: rope length.
+   * dest/destFace: where the rider's head lands (XZ) and what they face on
+   * arrival — you always come out of the flash looking at the payoff.
+   * aimRoot: what the desktop crosshair may rest on to count as "aimed at
+   * this ring" (defaults to the parent, so clicking the whole sign works).
    */
-  constructor({ scene, audio, pool, position, faceTarget, dest, destFace, title, sub1, sub2, hint }) {
+  constructor({ parent, audio, pool, attach, drop = 0.3, dest, destFace, hint, aimRoot = null }) {
     this.audio = audio;
     this.pool = pool;
     this.dest = dest.clone();
     this.destFace = destFace.clone();
     this.hint = hint;
+    this.aimRoot = aimRoot ?? parent;
     this.cooldown = 0;
     this.time = 0;
     this._phase = Math.random() * 7;
+    this._ringY = attach.y - drop - 0.085;
 
     const root = new THREE.Group();
     this.root = root;
-    root.position.set(position.x, terrainHeight(position.x, position.z), position.z);
-    root.rotation.y = Math.atan2(faceTarget.x - position.x, faceTarget.z - position.z);
 
-    const wood = new THREE.MeshStandardMaterial({
-      color: 0x5a442c, roughness: 0.8, metalness: 0, envMapIntensity: 0.35,
-    });
-    const woodDark = new THREE.MeshStandardMaterial({
-      color: 0x4a3a26, roughness: 0.8, metalness: 0, envMapIntensity: 0.35,
-    });
-
-    const post = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.05, 2.1, 7), wood);
-    post.position.y = 1.05;
-    post.castShadow = true;
-    root.add(post);
-
-    // gallows arm (plus a diagonal brace) that the ring hangs from
-    const arm = new THREE.Mesh(new THREE.BoxGeometry(0.72, 0.055, 0.055), wood);
-    arm.position.set(0.3, 2.02, 0);
-    arm.castShadow = true;
-    root.add(arm);
-    const brace = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.04, 0.04), woodDark);
-    brace.position.set(0.16, 1.85, 0);
-    brace.rotation.z = 0.75;
-    root.add(brace);
-
-    const tex = boardTexture(title, sub1, sub2);
-    const board = new THREE.Mesh(
-      new THREE.BoxGeometry(0.95, 0.48, 0.04),
-      [woodDark, woodDark, woodDark, woodDark,
-        new THREE.MeshStandardMaterial({
-          map: tex, roughness: 0.72, envMapIntensity: 0.4,
-          // faint self-glow so the invitation reads by moonlight
-          emissive: 0xffffff, emissiveMap: tex, emissiveIntensity: 0.16,
-        }),
-        woodDark],
-    );
-    board.position.y = 1.38;
-    board.rotation.z = 0.015;
-    board.castShadow = true;
-    root.add(board);
-
-    // the rope and the ring itself
     const rope = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.008, 0.008, 0.3, 5),
+      new THREE.CylinderGeometry(0.008, 0.008, drop, 5),
       new THREE.MeshStandardMaterial({ color: 0x3a2f20, roughness: 0.95 }),
     );
-    rope.position.set(0.58, 1.85, 0);
+    rope.position.set(attach.x, attach.y - drop / 2, attach.z);
     root.add(rope);
 
     this.ringMat = new THREE.MeshStandardMaterial({
@@ -131,7 +100,7 @@ export class TeleportStation {
       emissive: 0xff9540, emissiveIntensity: 0.55,
     });
     this.ring = new THREE.Mesh(new THREE.TorusGeometry(0.095, 0.016, 8, 24), this.ringMat);
-    this.ring.position.set(0.58, 1.6, 0);
+    this.ring.position.set(attach.x, this._ringY, attach.z);
     root.add(this.ring);
 
     // soft additive halo: at night this is what says "the magic part"
@@ -143,7 +112,7 @@ export class TeleportStation {
     this.glow.position.copy(this.ring.position);
     root.add(this.glow);
 
-    scene.add(root);
+    parent.add(root);
   }
 
   ringWorldPos(out) {
@@ -221,11 +190,83 @@ export class TeleportStation {
     if (this.cooldown > 0) this.cooldown -= dt;
     // the ring bobs, sways and breathes so it reads as "grab me" from afar
     const bob = Math.sin(time * 1.7 + this._phase) * 0.025;
-    this.ring.position.y = 1.6 + bob;
+    this.ring.position.y = this._ringY + bob;
     this.ring.rotation.y = Math.sin(time * 0.9 + this._phase) * 0.35;
     this.glow.position.y = this.ring.position.y;
     const pulse = 0.75 + 0.25 * Math.sin(time * 2.6 + this._phase);
     this.ringMat.emissiveIntensity = 0.35 + 0.45 * pulse;
     this.glow.material.opacity = 0.16 + 0.2 * pulse;
   }
+}
+
+export class TeleportStation {
+  /**
+   * A free-standing waypost carrying a board and a ring, for spots with no
+   * existing sign. position/faceTarget: where it stands, what the board faces.
+   */
+  constructor({ scene, audio, pool, position, faceTarget, dest, destFace, title, sub1, sub2, hint }) {
+    const root = new THREE.Group();
+    this.root = root;
+    root.position.set(position.x, terrainHeight(position.x, position.z), position.z);
+    root.rotation.y = Math.atan2(faceTarget.x - position.x, faceTarget.z - position.z);
+
+    const wood = new THREE.MeshStandardMaterial({
+      color: 0x5a442c, roughness: 0.8, metalness: 0, envMapIntensity: 0.35,
+    });
+    const woodDark = new THREE.MeshStandardMaterial({
+      color: 0x4a3a26, roughness: 0.8, metalness: 0, envMapIntensity: 0.35,
+    });
+
+    const post = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.05, 2.1, 7), wood);
+    post.position.y = 1.05;
+    post.castShadow = true;
+    root.add(post);
+
+    // gallows arm (plus a diagonal brace) that the ring hangs from
+    const arm = new THREE.Mesh(new THREE.BoxGeometry(0.72, 0.055, 0.055), wood);
+    arm.position.set(0.3, 2.02, 0);
+    arm.castShadow = true;
+    root.add(arm);
+    const brace = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.04, 0.04), woodDark);
+    brace.position.set(0.16, 1.85, 0);
+    brace.rotation.z = 0.75;
+    root.add(brace);
+
+    const tex = boardTexture(title, sub1, sub2);
+    const board = new THREE.Mesh(
+      new THREE.BoxGeometry(0.95, 0.48, 0.04),
+      [woodDark, woodDark, woodDark, woodDark,
+        new THREE.MeshStandardMaterial({
+          map: tex, roughness: 0.72, envMapIntensity: 0.4,
+          // faint self-glow so the invitation reads by moonlight
+          emissive: 0xffffff, emissiveMap: tex, emissiveIntensity: 0.16,
+        }),
+        woodDark],
+    );
+    // nailed to the FRONT of the post (post radius ≈0.04 at this height,
+    // board back face at z=0.045) so the post can never cross the text — the
+    // same never-occlude-the-words rule as the camp and exit signs
+    board.position.set(0, 1.38, 0.065);
+    board.rotation.z = 0.015;
+    board.castShadow = true;
+    root.add(board);
+
+    scene.add(root);
+
+    this.ring = new TeleportRing({
+      parent: root, audio, pool,
+      attach: new THREE.Vector3(0.58, 1.99, 0),
+      drop: 0.3,
+      dest, destFace, hint,
+      aimRoot: root,
+    });
+    this.hint = hint;
+    this.aimRoot = root;
+  }
+
+  ringWorldPos(out) { return this.ring.ringWorldPos(out); }
+
+  use(player, camera, onYaw = null) { return this.ring.use(player, camera, onYaw); }
+
+  update(dt, time) { this.ring.update(dt, time); }
 }

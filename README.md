@@ -67,10 +67,14 @@ before the boom arrives**. Walk the quarter mile and the roar turns from a
 bass mountain into a ripping furnace, the bearings groan under the load, and
 you have to crane your neck to find the top.
 
-Don't fancy the walk? By the trailhead sign hangs a **glowing brass ring on a
-waypost** — grab it (VR) or click it (desktop) and it whisks you out to stand
-at the wheel's feet in a flash of gold sparks, facing straight up at the arc.
-A second waypost out there brings you home to camp the same way.
+Don't fancy the walk? A **glowing brass pull-ring** hangs under the trailhead
+sign — grab it (VR) or click it (desktop) and it whisks you out to stand at
+the wheel's feet in a flash of gold sparks, facing straight up at the arc. A
+waypost out there brings you home to camp the same way. And if you arrive to
+find the wheel burnt out and freewheeling in the dark, the **keeper's firing
+box** sits right by the landing spot, wired to the near leg: plunge it and
+the whole program kindles over again, bank by bank. It re-arms itself
+whenever the Colossus can take a light.
 
 ## The lounge
 

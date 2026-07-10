@@ -28,12 +28,13 @@ const r = await page.evaluate(async () => {
   });
   const head = () => camera.getWorldPosition(new app.THREE.Vector3());
 
-  // ---- 1) two stations exist: trailhead outbound, colossus return ----
+  // ---- 1) two rings exist: one ON the trailhead sign, a waypost out there ----
   const tps = world.teleporters ?? [];
-  out.twoStations = tps.length === 2;
+  out.twoRings = tps.length === 2;
   const [toCol, toCamp] = tps;
   const hub = world.colossus.group.position;
-  out.trailheadNearCamp = toCol.root.position.length() < 25;
+  out.ringOnTrailSign = toCol.aimRoot === world.colossus.trailSign;
+  out.ringNearCamp = toCol.ringWorldPos(new app.THREE.Vector3()).length() < 25;
 
   // ---- 2) ride out: land close under the wheel, facing it ----
   out.rideOut = toCol.use(player, camera) === true;

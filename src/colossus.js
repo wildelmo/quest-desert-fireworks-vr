@@ -221,13 +221,16 @@ function signTexture() {
   g.fillStyle = '#f2e3bc';
   g.font = 'bold 58px Georgia, serif';
   g.textAlign = 'center';
-  g.fillText('THE COLOSSUS', 256, 82);
-  g.font = '34px Georgia, serif';
+  g.fillText('THE COLOSSUS', 256, 78);
+  g.font = '32px Georgia, serif';
   g.fillStyle = '#e8cf9a';
-  g.fillText('grand fire-wheel · ¼ mile', 256, 146);
-  g.font = '28px Georgia, serif';
+  g.fillText('grand fire-wheel · ¼ mile', 256, 132);
+  g.font = '26px Georgia, serif';
   g.fillStyle = '#c9ab72';
-  g.fillText('runs all night — mind the sparks', 256, 204);
+  g.fillText('runs all night — mind the sparks', 256, 180);
+  g.font = 'bold 26px Georgia, serif';
+  g.fillStyle = '#ffd9a0';
+  g.fillText('grab the ring to ride out', 256, 232);
   const tex = new THREE.CanvasTexture(c);
   tex.colorSpace = THREE.SRGBColorSpace;
   return tex;
@@ -655,6 +658,7 @@ export function createColossus(scene, fireworks, pool, audio) {
   // access track: ruts, telegraph poles, a signpost — repeated known-size
   // objects diminishing toward the wheel make the distance legible
   // =========================================================================
+  let trailSign = null; // exposed: the teleport ring hangs off this sign
   {
     const dir = _v1.set(COLOSSUS_POS.x, 0, COLOSSUS_POS.z).normalize().clone();
     const perp = new THREE.Vector3(-dir.z, 0, dir.x);
@@ -737,11 +741,14 @@ export function createColossus(scene, fireworks, pool, audio) {
     board.rotation.y = Math.PI; // +z face carries the art; flip toward camp
     sign.add(board);
     scene.add(sign);
+    trailSign = sign;
   }
 
   root.updateMatrixWorld(true);
   const hubWorld = wheel.getWorldPosition(new THREE.Vector3());
   const axisW = _v1.set(0, 0, 1).applyQuaternion(root.quaternion).clone(); // fixed spin axis
+  // where the keeper's firing wire terminates: the camp-side A-frame foot
+  const wireAnchor = root.localToWorld(new THREE.Vector3(FEET[0][0], FEET[0][1], FEET[0][2]));
 
   // =========================================================================
   // the program — dark / kindle / glory / sputter, forever
@@ -895,6 +902,21 @@ export function createColossus(scene, fireworks, pool, audio) {
     forceSalute: salute,
     forceOverdrive(x) { overdrive = clamp(x, 0, 1); },
     speedRing,
+    trailSign,
+    wireAnchor,
+    /** The keeper's firing box calls this: relight a dark or dying wheel
+     *  (kindle from scratch); if it's already in glory, buy it more time
+     *  and crack a salute so the plunge still answers back. */
+    ignite() {
+      if (phase === 'kindle') return false;
+      if (phase === 'glory') {
+        phaseT = Math.min(phaseT, 8);
+        salute();
+        return true;
+      }
+      setPhase('kindle');
+      return true;
+    },
     get state() {
       return { phase, phaseT, omega, angle, burnAvg, emberAvg, overdrive };
     },

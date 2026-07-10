@@ -334,11 +334,11 @@ export class XRHand {
       if (d < bestD) { best = item; bestD = d; }
     }
 
-    // the detonator's T-handle competes on distance like anything else — a
+    // a detonator's T-handle competes on distance like anything else — a
     // belt draped over the box must still be grabbable — and only one hand
-    // can own the plunger at a time
-    const det = this.ix.world.detonator;
-    if (det && !det.grabbed) {
+    // can own a plunger at a time
+    for (const det of this.ix.world.detonators ?? []) {
+      if (det.grabbed) continue;
       const detD = det.barWorldPos(_v2).distanceTo(gripPos);
       if (detD < 0.17 && detD < bestD && det.beginGrab()) {
         this.plunger = det;
@@ -479,12 +479,21 @@ export class DesktopControls {
     return hit.length > 0 && hit[0].distance < 4;
   }
 
-  /** The teleport waypost the crosshair rests on (anywhere on the post). */
+  /** The teleport ring the crosshair rests on (anywhere on its sign/post). */
   aimedTeleporter() {
     this.raycaster.setFromCamera({ x: 0, y: 0 }, this.ix.camera);
     for (const tp of this.ix.world.teleporters ?? []) {
-      const hit = this.raycaster.intersectObject(tp.root, true);
+      const hit = this.raycaster.intersectObject(tp.aimRoot, true);
       if (hit.length > 0 && hit[0].distance < 4.5) return tp;
+    }
+    return null;
+  }
+
+  /** The detonator box the crosshair rests on, with its aim distance. */
+  aimedDetonator() {
+    for (const det of this.ix.world.detonators ?? []) {
+      const d = det.aimDistance(this.raycaster, this.ix.camera);
+      if (d != null) return { det, distance: d };
     }
     return null;
   }
@@ -545,14 +554,14 @@ export class DesktopControls {
         return;
       }
     }
-    // the detonator: click it and the handle throws itself — unless an
+    // a detonator: click it and the handle throws itself — unless an
     // item is lying in front of it, in which case the click-grab wins
     if (!this.held) {
-      const detDist = ix.world.detonator?.aimDistance(this.raycaster, ix.camera);
-      if (detDist != null) {
+      const aimed = this.aimedDetonator();
+      if (aimed) {
         const hit = this.aimHit();
-        if (!(hit?.item && hit.distance < detDist)) {
-          ix.world.detonator.autoPlunge();
+        if (!(hit?.item && hit.distance < aimed.distance)) {
+          aimed.det.autoPlunge();
           return;
         }
       }
@@ -647,8 +656,9 @@ export class DesktopControls {
       else if (this.held) msg = `${this.held.type.label} — click the sand to plant · scroll to tilt (${Math.round(this.tilt * 57)}°) · E to drop`;
       else if (this.aimedTeleporter()) msg = `✨ ${this.aimedTeleporter().hint}`;
       else if (this.aimingAtExit()) msg = 'Click — exit to menu';
-      else if (this.ix.world.detonator?.aimDistance(this.raycaster, this.ix.camera) != null) {
-        msg = this.ix.world.detonator.armed ? '💥 Click — PLUNGE (grand finale)' : 'the finale is running…';
+      else if (this.aimedDetonator()) {
+        const det = this.aimedDetonator().det;
+        msg = det.armed ? det.hintArmed : det.hintBusy;
       } else {
         const hit = this.aimHit();
         if (hit?.item) msg = hit.item.isTorch ? 'E — take the torch' : `E — grab ${hit.item.type.label}`;

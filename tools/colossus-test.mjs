@@ -58,6 +58,13 @@ const r = await page.evaluate(async () => {
   out.driversOut = col.pods.every((p) => p.target === 0);
   out.freewheeling = s2.omega > 0.01 && s2.omega <= s1.omega + 0.15;
 
+  // ---- 4c) the keeper's firing box relights it from dark ----
+  const cdet = world.colossusDetonator;
+  out.relightBoxArmed = cdet.armed === true;
+  cdet.autoPlunge();
+  await waitGame(1);
+  out.relightKindles = col.state.phase === 'kindle' && cdet.armed === false;
+
   // ---- 4b) overdrive: at full throttle it winds up to a genuine rip and
   // the rim smears into a hoop of light ----
   col.forcePhase('glory');
@@ -66,6 +73,11 @@ const r = await page.evaluate(async () => {
   const s3 = col.state;
   out.overdriveRips = s3.omega > 0.8 && s3.omega < 2.2;
   out.ringOfLight = col.speedRing.material.opacity > 0.05;
+
+  // ---- 4d) the box springs back to life once the wheel is askable again ----
+  col.forcePhase('sputter');
+  await waitGame(0.5);
+  out.boxRearms = cdet.armed === true;
 
   // ---- 5) it never touches the gameplay items/lottery ----
   out.notAnItem = ![...fireworks.items].some((i) => i.type?.label?.includes('Colossus'));
