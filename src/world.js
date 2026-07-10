@@ -7,7 +7,8 @@ import { createTerrain, terrainHeight, terrainNormal } from './terrain.js';
 import { createSky, createNightEnvMap, MOON_DIR } from './sky.js';
 import { FinaleShow } from './show.js';
 import { createLounge } from './props.js';
-import { createColossus } from './colossus.js';
+import { createColossus, COLOSSUS_POS } from './colossus.js';
+import { TeleportStation } from './teleport.js';
 import { mulberry32, randRange, clamp } from './utils.js';
 
 const WOOD = 0x6b5236;
@@ -806,6 +807,43 @@ export function createWorld(scene, fireworks, pool, audio) {
   // program all night (see colossus.js for how it earns its size)
   const colossus = createColossus(scene, fireworks, pool, audio);
 
+  // teleport wayposts: a glowing ring by the Colossus trailhead sign that
+  // whisks you out to stand at the wheel's feet, and one out there that
+  // brings you home. The 280 m stays real — the ride is a courtesy, not a
+  // shrinking of the world.
+  const colDir = new THREE.Vector3(COLOSSUS_POS.x, 0, COLOSSUS_POS.z).normalize();
+  const colPerp = new THREE.Vector3(-colDir.z, 0, colDir.x);
+  const hubXZ = new THREE.Vector3(COLOSSUS_POS.x, 0, COLOSSUS_POS.z);
+  // land ~8 m off the paved apron, camp side, right under the arc of the rim
+  const colossusArrive = hubXZ.clone().addScaledVector(colDir, -32);
+  const toColossus = new TeleportStation({
+    scene, audio, pool,
+    position: new THREE.Vector3().addScaledVector(colDir, 14.5).addScaledVector(colPerp, 5.2),
+    faceTarget: new THREE.Vector3(0, 0, 0), // board reads from camp
+    dest: colossusArrive,
+    destFace: hubXZ, // arrive facing the wheel — the whole point
+    title: 'THE COLOSSUS',
+    sub1: 'grab the ring below',
+    sub2: '— it takes you there —',
+    hint: 'Click the ring — ride out to the Colossus',
+  });
+  const toCamp = new TeleportStation({
+    scene, audio, pool,
+    position: colossusArrive.clone().addScaledVector(colPerp, 3.4),
+    faceTarget: colossusArrive, // board faces where riders land
+    dest: new THREE.Vector3(0.6, 0, 1.8),
+    destFace: new THREE.Vector3(-1.4, 0, -1.1), // arrive facing the crate
+    title: 'BACK TO CAMP',
+    sub1: 'grab the ring below',
+    sub2: '— home in a blink —',
+    hint: 'Click the ring — snap back to camp',
+  });
+  const teleporters = [toColossus, toCamp];
+  scene.add(
+    contactShadow(toColossus.root.position.x, toColossus.root.position.z, 0.3, 0.26, 0.4),
+    contactShadow(toCamp.root.position.x, toCamp.root.position.z, 0.3, 0.26, 0.4),
+  );
+
   return {
     sky,
     torch,
@@ -814,10 +852,12 @@ export function createWorld(scene, fireworks, pool, audio) {
     detonator,
     show,
     colossus,
+    teleporters,
     exitBoard: exit.board,
     update(dt, time) {
       sky.update(dt, time);
       colossus.update(dt, time);
+      for (const tp of teleporters) tp.update(dt, time);
       restocker.update(dt);
       torch.update(dt, time, terrainHeight);
       detonator.update(dt);

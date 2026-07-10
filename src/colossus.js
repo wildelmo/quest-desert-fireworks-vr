@@ -9,11 +9,15 @@
 //   real distance ..... it stands 280 m from camp, so walking around the
 //                       campsite barely moves it against the sky (the
 //                       parallax of a far mountain, not a nearby prop);
-//   slow arc .......... peak spin is ~0.32 rad/s — one revolution every
-//                       twenty seconds (the hand pinwheel turns 100x
-//                       faster). Drive torque fights quadratic aero drag,
-//                       so it takes half a minute to wind up and coasts
-//                       for minutes when the drivers die;
+//   slow arc, then not. it kindles at ~0.32 rad/s — one revolution every
+//                       twenty seconds — and the drivers keep throttling up
+//                       through all of glory until it tops out near
+//                       1.3 rad/s, the rim ripping past at ~70 m/s and the
+//                       pod fire smearing into a hoop of light (still 30x
+//                       slower than the hand pinwheel). Drive torque fights
+//                       quadratic aero drag, so every change of pace takes
+//                       real seconds and it coasts for minutes when the
+//                       drivers die;
 //   hierarchy ......... no smooth circles: segmented rim chords with gusset
 //                       plates, a mid ring, trussed spokes, cable stays —
 //                       structure inside structure, so there is always one
@@ -31,10 +35,11 @@
 //                       you walk up, and near the base the bearings groan
 //                       under the load.
 //
-// Perf: the whole monument is ~25 draw calls and ~12k triangles (instanced
+// Perf: the whole monument is ~26 draw calls and ~12k triangles (instanced
 // bars for every truss member), one extra PointLight that exists from
 // startup (the scene's light count never changes — see FlashPool), and it
-// feeds the shared GPU particle pool at a peak of ~1k spawns/s.
+// feeds the shared GPU particle pool at a peak of ~2.5k spawns/s at full
+// rip (sparks live ~2 s, so it holds ~5k of the 96k-particle pool).
 
 import * as THREE from 'three';
 import { mergeGeometries } from '../lib/BufferGeometryUtils.js';
@@ -54,10 +59,14 @@ const N_OUT = 48;        // outer rim chords
 const N_IN = 24;         // inner rim chords
 const N_PODS = 8;
 
-// steady-state spin ~= sqrt(8 * POD_ACCEL / AERO): 0.32 rad/s at full burn
-const POD_ACCEL = 0.0019; // rad/s^2 of drive per pod
-const AERO = 0.145;       // quadratic aero drag on the wheel
-const BEARING = 0.00012;  // constant bearing friction (what finally stops it)
+// steady-state spin ~= sqrt(8 * POD_ACCEL * throttle / AERO): 0.32 rad/s at
+// kindle throttle, ~1.3 rad/s once the overdrive has wound all the way in —
+// a revolution every five seconds, which on a 104 m wheel is menacing
+const POD_ACCEL = 0.0019;  // rad/s^2 of drive per pod, at kindle throttle
+const OVERDRIVE_GAIN = 15; // full throttle multiplies drive by (1 + this)
+const OVERDRIVE_RAMP = 45; // seconds of glory to reach full throttle
+const AERO = 0.145;        // quadratic aero drag on the wheel
+const BEARING = 0.00012;   // constant bearing friction (what finally stops it)
 
 const WIND = new THREE.Vector3(1.5, 0, 0.35); // matches the shells' smoke drift
 
@@ -606,6 +615,35 @@ export function createColossus(scene, fireworks, pool, audio) {
   halo.scale.setScalar(130);
   root.add(halo);
 
+  // the speed ring: past about a rev per fourteen seconds the eight pod
+  // fires stop reading as points and start smearing — a soft additive
+  // annulus over the rim fades in with omega and sells the hoop of light
+  const speedRing = (() => {
+    const c = document.createElement('canvas');
+    c.width = c.height = 256;
+    const g = c.getContext('2d');
+    const grad = g.createRadialGradient(128, 128, 0, 128, 128, 128);
+    grad.addColorStop(0.0, 'rgba(255,255,255,0)');
+    grad.addColorStop(0.60, 'rgba(255,255,255,0)');
+    grad.addColorStop(0.72, 'rgba(255,255,255,0.3)');
+    grad.addColorStop(0.86, 'rgba(255,255,255,1)');   // peak rides R_POD
+    grad.addColorStop(0.96, 'rgba(255,255,255,0.25)');
+    grad.addColorStop(1.0, 'rgba(255,255,255,0)');
+    g.fillStyle = grad;
+    g.fillRect(0, 0, 256, 256);
+    const mesh = new THREE.Mesh(
+      new THREE.PlaneGeometry(2 * R_POD / 0.86, 2 * R_POD / 0.86),
+      new THREE.MeshBasicMaterial({
+        map: new THREE.CanvasTexture(c), transparent: true, opacity: 0,
+        blending: THREE.AdditiveBlending, depthWrite: false,
+        side: THREE.DoubleSide, fog: false,
+      }),
+    );
+    mesh.position.y = HUB_H; // lives in the wheel plane (local z = 0)
+    root.add(mesh);
+    return mesh;
+  })();
+
   // the wheel's one real light: paints its dunes, its plume paints the sky.
   // Created at startup and never removed (light-count changes recompile
   // every shader on Quest — see FlashPool for the same dance).
@@ -730,6 +768,7 @@ export function createColossus(scene, fireworks, pool, audio) {
   let phaseT = 0;
   let phaseDur = 3.5;       // short first night-watch so newcomers see it wake
   let omega = 0;
+  let overdrive = 0;        // 0..1 driver throttle, winds up through glory
   let angle = Math.random() * Math.PI * 2;
   let burnAvg = 0, emberAvg = 0;
   let saluteT = 0, chaseT = 0, chaseLeft = 0, chaseStepT = 0, chaseIdx = 0;
@@ -854,8 +893,10 @@ export function createColossus(scene, fireworks, pool, audio) {
       }
     },
     forceSalute: salute,
+    forceOverdrive(x) { overdrive = clamp(x, 0, 1); },
+    speedRing,
     get state() {
-      return { phase, phaseT, omega, angle, burnAvg, emberAvg };
+      return { phase, phaseT, omega, angle, burnAvg, emberAvg, overdrive };
     },
   };
 
@@ -885,8 +926,12 @@ export function createColossus(scene, fireworks, pool, audio) {
     emberAvg = eSum / N_PODS;
 
     // ---- rotation: torque vs quadratic aero drag vs bearing friction.
-    // The inertia is the point — nothing about this wheel is instant. ----
-    const drive = bSum * POD_ACCEL;
+    // The inertia is the point — nothing about this wheel is instant. The
+    // drivers throttle up through all of glory, so the acceleration never
+    // lets off until the whole rim is a ripping hoop of fire. ----
+    if (phase === 'glory') overdrive = Math.min(1, overdrive + dt / OVERDRIVE_RAMP);
+    else overdrive *= Math.exp(-dt / 4);
+    const drive = bSum * POD_ACCEL * (1 + OVERDRIVE_GAIN * overdrive);
     omega += (drive - AERO * omega * Math.abs(omega) - (omega > 0.001 ? BEARING : 0)) * dt;
     if (omega < 0) omega = 0;
     angle += omega * dt;
@@ -936,6 +981,10 @@ export function createColossus(scene, fireworks, pool, audio) {
     halo.material.color.copy(fireCol);
     halo.material.opacity = 0.13 * burnAvg * flick + 0.018 * emberAvg;
     halo.scale.setScalar(130 + 105 * burnAvg);
+    // the faster it spins, the more the rim smears into a circle of light
+    const smear = clamp((omega - 0.45) / 0.75, 0, 1);
+    speedRing.material.opacity = smear * (0.08 + 0.3 * burnAvg) * flick;
+    speedRing.material.color.copy(fireCol).lerp(_c1.setRGB(1, 1, 1), 0.35 * smear);
     wheelLampMat.uniforms.uTime.value = time;
     wheelLampMat.uniforms.uGlow.value = 1.05 + 0.55 * burnAvg;
     staticLampMat.uniforms.uTime.value = time;
@@ -950,6 +999,7 @@ export function createColossus(scene, fireworks, pool, audio) {
     // ---- per-pod fire: flares, sparks, smoke, embers ----
     const listener = audio.listenerPos;
     const camDist = listener.distanceTo(hubWorld);
+    const rip = Math.min(omega, 1.4); // how hard the wheel is ripping
     for (let k = 0; k < N_PODS; k++) {
       const pod = pods[k];
       const podFlick = 0.75 + 0.25 * Math.sin(time * 10.7 + k * 2.43);
@@ -978,15 +1028,16 @@ export function createColossus(scene, fireworks, pool, audio) {
 
       if (active) {
         // sparks: the drivers hose fire backward along the rim; each spark
-        // inherits the (slow!) tip speed, so the spray combs into long arcs
-        // that fall away beneath the wheel
-        pod.sparkAcc += 105 * pod.burn * (0.7 + 0.5 * podFlick) * dt;
+        // inherits the tip speed, so at kindle pace the spray combs into
+        // long arcs that fall away beneath the wheel — and at full rip the
+        // 60+ m/s tips fling them into a continuous shredding halo
+        pod.sparkAcc += 105 * pod.burn * (0.7 + 0.5 * podFlick) * (1 + 1.5 * rip) * dt;
         let cnt = pod.sparkAcc | 0;
         pod.sparkAcc -= cnt;
         if (cnt > 0) {
           const col = _c1.copy(k % 2 ? palB : palA);
           pool.spawn(cnt, (i) => {
-            const exh = randRange(15, 34);
+            const exh = randRange(15, 34) * (1 + 0.5 * rip);
             const white = Math.random() < 0.22;
             const star = Math.random() < 0.06;
             pool.set(i,
@@ -1002,28 +1053,33 @@ export function createColossus(scene, fireworks, pool, audio) {
         }
 
         // its own gunpowder plume, drifting downwind and lit by its fire
+        // (tangential shove capped: smoke sheds off the fast rim and hangs,
+        // it doesn't fly with it)
         pod.smokeAcc += 3.0 * pod.burn * dt;
         cnt = pod.smokeAcc | 0;
         pod.smokeAcc -= cnt;
         if (cnt > 0) {
+          const smokeTip = Math.min(tip, 14);
           pool.spawn(cnt, (i) => {
             pool.set(i,
               p.x + randRange(-1, 1), p.y + randRange(-0.5, 1.5), p.z + randRange(-1, 1),
-              tx * tip * 0.35 + WIND.x * randRange(0.7, 1.3) + randRange(-0.4, 0.4),
+              tx * smokeTip * 0.35 + WIND.x * randRange(0.7, 1.3) + randRange(-0.4, 0.4),
               randRange(0.8, 1.8),
-              tz * tip * 0.35 + WIND.z * randRange(0.7, 1.3) + randRange(-0.4, 0.4),
+              tz * smokeTip * 0.35 + WIND.z * randRange(0.7, 1.3) + randRange(-0.4, 0.4),
               0.34 + fireCol.r * 0.08, 0.34 + fireCol.g * 0.08, 0.37 + fireCol.b * 0.08,
               time, randRange(7, 14),
               randRange(3.2, 6.5), -0.015, 0.8, -1);
           });
         }
 
-        // pass-by: a pod sweeping the bottom of the arc, heard from beneath
+        // pass-by: a pod sweeping the bottom of the arc, heard from beneath.
+        // At full rip these arrive every half second, pitched up and harder —
+        // the ripping-canvas edge the roar alone can't carry
         const bottom = Math.sin(pod.angle0 + angle) < -0.92;
-        if (bottom && !pod.wasBottom && camDist < 90 && pod.burn > 0.25 && audio.ready) {
+        if (bottom && !pod.wasBottom && camDist < 120 && pod.burn > 0.25 && audio.ready) {
           audio.play('whoosh', p, {
-            gain: clamp(40 / camDist, 0.3, 1.0) * 0.4,
-            rate: 0.42, refDistance: 9, send: 0.25,
+            gain: clamp(40 / camDist, 0.3, 1.0) * (0.4 + 0.35 * rip),
+            rate: 0.42 + 0.4 * rip, refDistance: 9, send: 0.25,
           });
         }
         pod.wasBottom = bottom;
@@ -1078,10 +1134,12 @@ export function createColossus(scene, fireworks, pool, audio) {
         roar.stop(3);
         roar = null;
       } else {
-        roar.setGain(1.35 * Math.min(1, burnAvg * 1.15));
-        roar.setRate(0.85 + 0.3 * burnAvg);
-        // air absorption: bass mountain from camp, furnace up close
-        roar.setLowpass(clamp(8000 - Math.max(0, camDist - 45) * 26, 850, 8000));
+        // louder and higher-revving as the wheel winds up
+        roar.setGain(1.35 * Math.min(1, burnAvg * 1.15) * (1 + 0.5 * Math.min(1, omega)));
+        roar.setRate(0.85 + 0.3 * burnAvg + 0.35 * Math.min(1, omega / 1.2));
+        // air absorption: bass mountain from camp, and up close the filter
+        // opens wide so the thrusters' ripping top end actually reaches you
+        roar.setLowpass(clamp(11500 - Math.max(0, camDist - 40) * 30, 850, 11500));
       }
     }
 
