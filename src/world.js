@@ -8,7 +8,7 @@ import { createSky, createNightEnvMap, MOON_DIR } from './sky.js';
 import { FinaleShow } from './show.js';
 import { createLounge } from './props.js';
 import { createColossus, COLOSSUS_POS } from './colossus.js';
-import { TeleportStation } from './teleport.js';
+import { TeleportRing, TeleportStation } from './teleport.js';
 import { mulberry32, randRange, clamp } from './utils.js';
 
 const WOOD = 0x6b5236;
@@ -196,7 +196,7 @@ export class Torch {
 // in the dunes and the two-minute grand finale begins. It re-arms (handle
 // creaks back up) once the show ends.
 
-function detonatorLabelTexture() {
+function detonatorLabelTexture(line1 = 'GRAND FINALE', line2 = '— plunge to fire —') {
   const c = document.createElement('canvas');
   c.width = 256; c.height = 160;
   const g = c.getContext('2d');
@@ -218,28 +218,31 @@ function detonatorLabelTexture() {
   g.fillText('DANGER', 128, 76);
   g.font = 'bold 24px Georgia, serif';
   g.fillStyle = '#e8c890';
-  g.fillText('GRAND FINALE', 128, 108);
+  g.fillText(line1, 128, 108);
   g.font = '18px Georgia, serif';
-  g.fillText('— plunge to fire —', 128, 132);
+  g.fillText(line2, 128, 132);
   const tex = new THREE.CanvasTexture(c);
   tex.colorSpace = THREE.SRGBColorSpace;
   return tex;
 }
 
 export class Detonator {
-  constructor(scene, audio, wireTarget) {
+  constructor(scene, audio, wireTarget, opts = {}) {
     this.audio = audio;
     this.armed = true;
     this.grabbed = false;
     this.norm = 1;        // 1 = handle up, 0 = plunged
     this.anim = null;     // 'down' (desktop auto-plunge) | 'up' (re-arm)
     this.onFire = null;
+    // desktop HUD lines (each box announces its own purpose)
+    this.hintArmed = opts.hintArmed ?? '💥 Click — PLUNGE (grand finale)';
+    this.hintBusy = opts.hintBusy ?? 'the finale is running…';
 
     const root = new THREE.Group();
     this.root = root;
 
     const W = 0.34, D = 0.26, H = 0.28;
-    const labelTex = detonatorLabelTexture();
+    const labelTex = detonatorLabelTexture(opts.labelLine1, opts.labelLine2);
     const box = new THREE.Mesh(
       new THREE.BoxGeometry(W, H, D),
       [woodMat(WOOD_DARK), woodMat(WOOD_DARK), woodMat(0x53402a), woodMat(WOOD_DARK),
@@ -807,24 +810,22 @@ export function createWorld(scene, fireworks, pool, audio) {
   // program all night (see colossus.js for how it earns its size)
   const colossus = createColossus(scene, fireworks, pool, audio);
 
-  // teleport wayposts: a glowing ring by the Colossus trailhead sign that
-  // whisks you out to stand at the wheel's feet, and one out there that
-  // brings you home. The 280 m stays real — the ride is a courtesy, not a
-  // shrinking of the world.
+  // teleport rings: one hanging under the Colossus trailhead sign that
+  // whisks you out to stand at the wheel's feet, and a waypost out there
+  // that brings you home. The 280 m stays real — the ride is a courtesy,
+  // not a shrinking of the world.
   const colDir = new THREE.Vector3(COLOSSUS_POS.x, 0, COLOSSUS_POS.z).normalize();
   const colPerp = new THREE.Vector3(-colDir.z, 0, colDir.x);
   const hubXZ = new THREE.Vector3(COLOSSUS_POS.x, 0, COLOSSUS_POS.z);
   // land ~8 m off the paved apron, camp side, right under the arc of the rim
   const colossusArrive = hubXZ.clone().addScaledVector(colDir, -32);
-  const toColossus = new TeleportStation({
-    scene, audio, pool,
-    position: new THREE.Vector3().addScaledVector(colDir, 14.5).addScaledVector(colPerp, 5.2),
-    faceTarget: new THREE.Vector3(0, 0, 0), // board reads from camp
+  const toColossus = new TeleportRing({
+    parent: colossus.trailSign, audio, pool,
+    // tied under the board's bottom edge, on the camp-facing side of the post
+    attach: new THREE.Vector3(0, 1.12, -0.06),
+    drop: 0.12,
     dest: colossusArrive,
     destFace: hubXZ, // arrive facing the wheel — the whole point
-    title: 'THE COLOSSUS',
-    sub1: 'grab the ring below',
-    sub2: '— it takes you there —',
     hint: 'Click the ring — ride out to the Colossus',
   });
   const toCamp = new TeleportStation({
@@ -839,10 +840,24 @@ export function createWorld(scene, fireworks, pool, audio) {
     hint: 'Click the ring — snap back to camp',
   });
   const teleporters = [toColossus, toCamp];
-  scene.add(
-    contactShadow(toColossus.root.position.x, toColossus.root.position.z, 0.3, 0.26, 0.4),
-    contactShadow(toCamp.root.position.x, toCamp.root.position.z, 0.3, 0.26, 0.4),
-  );
+  scene.add(contactShadow(toCamp.root.position.x, toCamp.root.position.z, 0.3, 0.26, 0.4));
+
+  // the keeper's firing box: a second plunger by the landing spot, wired to
+  // the near A-frame foot. When the wheel has sputtered out (or gone dark
+  // between shows), plunge it to kindle the whole program over again — it
+  // re-arms itself whenever the Colossus is askable.
+  const colossusDet = new Detonator(scene, audio, colossus.wireAnchor.clone(), {
+    labelLine1: 'THE COLOSSUS',
+    labelLine2: '— plunge to wake —',
+    hintArmed: '💥 Click — PLUNGE (wake the Colossus)',
+    hintBusy: 'the Colossus is burning…',
+  });
+  const detPos = colossusArrive.clone().addScaledVector(colPerp, -2.8);
+  colossusDet.root.position.set(detPos.x, terrainHeight(detPos.x, detPos.z), detPos.z);
+  colossusDet.root.rotation.y = Math.atan2(colossusArrive.x - detPos.x, colossusArrive.z - detPos.z);
+  colossusDet.layWire(scene);
+  scene.add(contactShadow(detPos.x, detPos.z, 0.3, 0.26, 0.45));
+  colossusDet.onFire = () => colossus.ignite();
 
   return {
     sky,
@@ -853,6 +868,8 @@ export function createWorld(scene, fireworks, pool, audio) {
     show,
     colossus,
     teleporters,
+    colossusDetonator: colossusDet,
+    detonators: [detonator, colossusDet],
     exitBoard: exit.board,
     update(dt, time) {
       sky.update(dt, time);
@@ -861,6 +878,11 @@ export function createWorld(scene, fireworks, pool, audio) {
       restocker.update(dt);
       torch.update(dt, time, terrainHeight);
       detonator.update(dt);
+      colossusDet.update(dt);
+      // the keeper's box springs live again once the wheel can take a light
+      const cph = colossus.state.phase;
+      if (!colossusDet.armed && !colossusDet.grabbed && colossusDet.anim !== 'down'
+        && (cph === 'dark' || cph === 'sputter')) colossusDet.rearm();
       show.update(dt, time);
       lounge.update(time);
       lanternLight.intensity = 5.4 + Math.sin(time * 11) * 0.5 + Math.sin(time * 5.1) * 0.3;
