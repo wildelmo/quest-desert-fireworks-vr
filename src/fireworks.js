@@ -1,16 +1,20 @@
 // Fireworks gameplay: the items you hold and plant, burning fuses, rocket
 // flight, and the shell-burst choreography (peony, dahlia, chrysanthemum,
-// willow, palm, ring, crossette, crackle, strobe, serpents, brocade,
-// multi-break) drawn through the GPU particle pool. Also owns the pooled
-// flash lights that slam the terrain with color on every burst.
+// willow, palm, ring, saturn, crossette, crackle, strobe, serpents, brocade,
+// kamuro, ghost, horsetail, falling leaves, time-rain, multi-break) drawn
+// through the GPU particle pool. Also owns the pooled flash lights that slam
+// the terrain with color on every burst.
 
 import * as THREE from 'three';
 import { randRange, randPick, clamp } from './utils.js';
+import { CELL } from './particles.js';
 
 // Colorways matched to a classic display photo: a huge amber-gold
 // chrysanthemum, scarlet shells with pale pink tips, teal/aqua shells (one
 // breaking over a warm ember core), royal violet — plus gold and silver for
-// brocade/glitter work. a = the shell's stars, b = tips/pistil/accents.
+// brocade/glitter work, and the real pyro-chemistry colors (barium green,
+// copper blue, strontium red) a display crew would actually shoot.
+// a = the shell's stars, b = tips/pistil/accents.
 export const PALETTES = [
   { name: 'golden brocade', a: 0xffab42, b: 0xffe9b0 },
   { name: 'scarlet pink', a: 0xff2430, b: 0xff8fae },
@@ -20,6 +24,10 @@ export const PALETTES = [
   { name: 'crimson gold', a: 0xff4033, b: 0xffb347 },
   { name: 'pure gold', a: 0xffc04d, b: 0xfff2bb },
   { name: 'silver', a: 0xeef2ff, b: 0xcfd8ff },
+  { name: 'barium emerald', a: 0x2ee94e, b: 0xc2ffd4 },
+  { name: 'copper blue', a: 0x3c78ff, b: 0xa8c9ff },
+  { name: 'blue gold', a: 0x4a82ff, b: 0xffc04d },
+  { name: 'strontium red', a: 0xff2d12, b: 0xffa06b },
 ];
 
 export const ITEM_TYPES = {
@@ -27,21 +35,21 @@ export const ITEM_TYPES = {
     kind: 'rocket', label: 'Bottle Rocket',
     bodyR: 0.018, bodyLen: 0.11, stickLen: 0.55,
     size: 0.32, fuseTime: 2.0, thrust: 46, burnTime: 0.85, coast: 1.15,
-    shells: ['peony', 'dahlia', 'ring', 'crackle', 'strobe'],
+    shells: ['peony', 'dahlia', 'ring', 'crackle', 'strobe', 'ghost'],
     weight: 3,
   },
   rocketMed: {
     kind: 'rocket', label: 'Sky Rocket',
     bodyR: 0.028, bodyLen: 0.17, stickLen: 0.72,
     size: 0.6, fuseTime: 2.6, thrust: 42, burnTime: 1.4, coast: 1.5,
-    shells: ['peony', 'dahlia', 'chrys', 'willow', 'ring', 'crossette', 'crackle', 'serpents'],
+    shells: ['peony', 'dahlia', 'chrys', 'willow', 'ring', 'saturn', 'crossette', 'crackle', 'serpents', 'ghost'],
     weight: 3,
   },
   rocketLarge: {
     kind: 'rocket', label: 'Mammoth Rocket',
     bodyR: 0.042, bodyLen: 0.26, stickLen: 0.92,
     size: 1.3, fuseTime: 3.2, thrust: 43, burnTime: 2.1, coast: 2.2,
-    shells: ['peony', 'dahlia', 'chrys', 'willow', 'palm', 'crossette', 'brocade', 'serpents', 'multibreak'],
+    shells: ['peony', 'dahlia', 'chrys', 'willow', 'palm', 'crossette', 'brocade', 'serpents', 'multibreak', 'kamuro', 'ghost', 'saturn', 'horsetail'],
     weight: 2,
   },
   rocketGrand: {
@@ -50,7 +58,7 @@ export const ITEM_TYPES = {
     size: 1.8, fuseTime: 3.6, thrust: 45, burnTime: 2.45, coast: 2.45,
     // dahlia twice: the grand shells are the display pieces, and the
     // long-ray dahlia is the postcard look they exist for
-    shells: ['peony', 'dahlia', 'dahlia', 'chrys', 'willow', 'palm', 'brocade', 'serpents', 'multibreak'],
+    shells: ['peony', 'dahlia', 'dahlia', 'chrys', 'willow', 'palm', 'brocade', 'serpents', 'multibreak', 'kamuro', 'kamuro', 'ghost', 'timerain', 'horsetail', 'leaves'],
     weight: 2,
   },
   fountain: {
@@ -191,7 +199,9 @@ class FlashPool {
   }
 }
 
-// Expanding glow sprite at the burst point.
+// The burst-point flash: an expanding radial glow plus an anamorphic lens
+// flare (a real streak-flare texture) — together they read like the blown-out
+// frame a camera catches at the instant of the break.
 class FlashSprites {
   constructor(scene, count = 4) {
     const c = document.createElement('canvas');
@@ -204,6 +214,7 @@ class FlashSprites {
     g.fillStyle = grad;
     g.fillRect(0, 0, 64, 64);
     const tex = new THREE.CanvasTexture(c);
+    const flareTex = new THREE.TextureLoader().load('assets/textures/particles/flare_01.png');
     this.sprites = [];
     for (let i = 0; i < count; i++) {
       const s = new THREE.Sprite(new THREE.SpriteMaterial({
@@ -212,7 +223,13 @@ class FlashSprites {
       }));
       s.visible = false;
       scene.add(s);
-      this.sprites.push({ sprite: s, t: 1e9, dur: 0.35, from: 2, to: 20 });
+      const f = new THREE.Sprite(new THREE.SpriteMaterial({
+        map: flareTex, transparent: true, opacity: 0, depthWrite: false,
+        blending: THREE.AdditiveBlending, fog: false,
+      }));
+      f.visible = false;
+      scene.add(f);
+      this.sprites.push({ sprite: s, flare: f, t: 1e9, dur: 0.35, from: 2, to: 20, fw: 10 });
     }
     this.cursor = 0;
   }
@@ -223,10 +240,16 @@ class FlashSprites {
     s.sprite.position.copy(pos);
     s.sprite.material.color.set(color);
     s.sprite.visible = true;
+    s.flare.position.copy(pos);
+    // the flare burns nearly white with just a kiss of the shell's color
+    s.flare.material.color.set(color).lerp(FLASH_WHITE, 0.55);
+    s.flare.material.rotation = randRange(-0.22, 0.22);
+    s.flare.visible = true;
     s.t = 0;
     s.dur = 0.45;
     s.from = 2.5 * size;
     s.to = 20 * size;
+    s.fw = 26 * size;
   }
 
   update(dt) {
@@ -234,10 +257,19 @@ class FlashSprites {
       if (!s.sprite.visible) continue;
       s.t += dt;
       const n = s.t / s.dur;
-      if (n >= 1) { s.sprite.visible = false; s.sprite.material.opacity = 0; continue; }
+      if (n >= 1) {
+        s.sprite.visible = false; s.sprite.material.opacity = 0;
+        s.flare.visible = false; s.flare.material.opacity = 0;
+        continue;
+      }
       const k = 1 - Math.pow(1 - n, 3);
       s.sprite.scale.setScalar(s.from + (s.to - s.from) * k);
       s.sprite.material.opacity = 0.9 * (1 - n);
+      // the anamorphic streak pops hard and dies faster than the glow ball
+      const fn = Math.min(1, n * 1.8);
+      s.flare.scale.set(s.fw * (0.5 + k * 0.9), s.fw * 0.26 * (0.5 + k * 0.5), 1);
+      s.flare.material.opacity = 0.95 * (1 - fn) * (1 - fn);
+      if (fn >= 1) s.flare.visible = false;
     }
   }
 }
@@ -1026,7 +1058,7 @@ export class FireworksSystem {
         pool.set(i,
           px, py + 0.04, pz,
           randRange(-0.3, 0.3), randRange(0.25, 0.6), randRange(-0.3, 0.3),
-          0.055, 0.055, 0.062,
+          0.42, 0.42, 0.46,
           time, randRange(2.2, 4.4),
           randRange(0.28, 0.5), -0.02, 1.6, -1);
       });
@@ -1138,7 +1170,7 @@ export class FireworksSystem {
       pool.set(i,
         pos.x, pos.y + 0.15, pos.z,
         Math.cos(a) * sp, randRange(0.25, 0.8), Math.sin(a) * sp,
-        0.10, 0.075, 0.05,
+        0.46, 0.36, 0.24,
         time, randRange(1.8, 3.2),
         randRange(0.45, 0.85) * (0.6 + size), -0.02, 1.8, -1);
     });
@@ -1256,7 +1288,9 @@ export class FireworksSystem {
     const vel = dir.clone().multiplyScalar(speed);
     const col = new THREE.Color(item.palette.a);
     const flightT = isFinale ? 3.0 : randRange(2.3, 2.7);
-    const pattern = isFinale ? randPick(['multibreak', 'palm', 'dahlia', 'chrys', 'brocade', 'serpents']) : randPick(['peony', 'dahlia', 'ring', 'crackle', 'strobe', 'willow', 'serpents']);
+    const pattern = isFinale
+      ? randPick(['multibreak', 'palm', 'dahlia', 'chrys', 'brocade', 'serpents', 'kamuro', 'timerain', 'saturn'])
+      : randPick(['peony', 'dahlia', 'ring', 'crackle', 'strobe', 'willow', 'serpents', 'ghost', 'saturn', 'leaves']);
     this._fireShot(muzzle, vel, col, 1.35, {
       gravity: 0.9, drag: 0.35, flightT,
       onBurst: (p, v) => this.burst(p, {
@@ -1427,6 +1461,7 @@ export class FireworksSystem {
     const pool = this.pool;
     const time = this.time;
     // the comet head plus a short stagger of followers = glowing streak
+    // (heads get a long shutter so the rise reads as a line of fire)
     pool.spawn(14, (i) => {
       const lag = Math.random() * 0.1;
       pool.set(i,
@@ -1434,8 +1469,27 @@ export class FireworksSystem {
         vel.x * (1 - lag * 2), vel.y * (1 - lag * 2), vel.z * (1 - lag * 2),
         color.r * 3.4, color.g * 3.4, color.b * 3.4,
         time + lag * 0.5, life * randRange(0.95, 1.1),
-        randRange(0.09, 0.14) * sizeMul, gravity, drag, 0);
+        randRange(0.09, 0.14) * sizeMul, gravity, drag, 0,
+        undefined, 0.03);
     });
+    // display shells climb on a glitter tail: strobing gold flecks shed all
+    // along the arc, precomputed with the same closed-form ballistics the
+    // shader integrates — they hang and wink where the shell passed
+    if (sizeMul >= 1.2) {
+      const d = Math.max(drag, 1e-4);
+      const gA = 9.81 * gravity;
+      pool.spawn(Math.round(26 * sizeMul), (i) => {
+        const ts = Math.random() * life;
+        const k = (1 - Math.exp(-d * ts)) / d;
+        const e = Math.exp(-d * ts);
+        pool.set(i,
+          pos.x + vel.x * k, pos.y + vel.y * k - gA * (ts - k) / d, pos.z + vel.z * k,
+          vel.x * e * 0.12 + randRange(-0.7, 0.7), vel.y * e * 0.12 + randRange(-0.9, 0.3), vel.z * e * 0.12 + randRange(-0.7, 0.7),
+          3.4, 2.4, 1.1,
+          time + ts, randRange(0.5, 1.1),
+          randRange(0.05, 0.09) * sizeMul, 0.3, 1.6, 28);
+      });
+    }
   }
 
   // Exhaust from a motor pinned in a fist: the flare rides the nozzle and a
@@ -1519,11 +1573,12 @@ export class FireworksSystem {
       pulse.color.lerp(colB, add / (pulse.energy + add));
       pulse.energy = Math.min(pulse.energy + add, 2.6);
 
-      // lingering smoke haze: a faint tinted cloud that slowly swells and
-      // drifts downwind after the stars die — what keeps a big shell from
-      // just vanishing into clean air
+      // lingering smoke haze: a real occluding cloud (albedo, lit by the
+      // moon and by later bursts — see the particle shader) that swells and
+      // drifts downwind after the stars die. What keeps a big shell from
+      // just vanishing into clean air, and what the next shell lights up.
       if (size > 0.3) {
-        pool.spawn(8 + Math.round(10 * size), (i) => {
+        pool.spawn(10 + Math.round(12 * size), (i) => {
           const u = Math.random() * 2 - 1;
           const a = Math.random() * Math.PI * 2;
           const rr = Math.sqrt(1 - u * u);
@@ -1531,7 +1586,7 @@ export class FireworksSystem {
           pool.set(i,
             pos.x, pos.y, pos.z,
             rr * Math.cos(a) * sp + dvx * 0.4 + 0.5, u * sp * 0.6 + dvy * 0.3 + 0.25, rr * Math.sin(a) * sp + dvz * 0.4,
-            colA.r * 0.08 + 0.03, colA.g * 0.08 + 0.032, colA.b * 0.08 + 0.038,
+            0.34 + colA.r * 0.10, 0.34 + colA.g * 0.10, 0.37 + colA.b * 0.10,
             time, randRange(3.5, 6.5) * (0.7 + size * 0.5),
             randRange(0.9, 1.6) * (0.5 + size), -0.012, 1.2, -1);
         });
@@ -1552,14 +1607,23 @@ export class FireworksSystem {
      * tighten as drag slows everything down, which is how the real thing
      * behaves. Costs (trail+1)x particles for a trailed layer.
      */
+    /**
+     * Extra realism knobs (all optional):
+     *   cell     atlas sprite for the stars (or [cellA, cellB, probB] to mix)
+     *   stretch  motion-blur shutter seconds (undefined = pool default)
+     *   shift    {color, t} — relay stars: every star switches to `color`
+     *            at life fraction t, with an ignition pop at the changeover
+     */
     const spawnSphere = (count, speed, opts = {}) => {
       const gravity = opts.gravity ?? 0.35;
       const drag = opts.drag ?? 0.65;
       const twinkle = opts.twinkle ?? 0;
       const beads = opts.trail ?? 0;
       const seg1 = beads + 1;
+      const shift = opts.shift;
+      const sc = shift ? new THREE.Color(shift.color) : null;
       // per-star state carried across the star's beads (fill runs in order)
-      let j = -1, vx, vy, vz, cr, cg, cb, life, psz, lag;
+      let j = -1, vx, vy, vz, cr, cg, cb, life, psz, lag, shiftT, sr, sg, sb;
       pool.spawn(count * seg1, (i) => {
         j++;
         const seg = j % seg1;
@@ -1584,18 +1648,28 @@ export class FireworksSystem {
           cr = white ? 7.4 * bright : c.r * 5.7 * bright;
           cg = white ? 7.2 * bright : c.g * 5.7 * bright;
           cb = white ? 6.7 * bright : c.b * 5.7 * bright;
+          if (sc) {
+            shiftT = shift.t * randRange(0.88, 1.12);
+            sr = sc.r * 5.7 * bright; sg = sc.g * 5.7 * bright; sb = sc.b * 5.7 * bright;
+          } else shiftT = 0;
           life = (opts.life ?? 2.4) * randRange(0.75, 1.25);
           psz = (opts.psize ?? 0.23) * randRange(0.7, 1.4) * (0.6 + size * 0.7);
           lag = randRange(0.022, 0.036);
+          const cell = Array.isArray(opts.cell)
+            ? (Math.random() < opts.cell[2] ? opts.cell[1] : opts.cell[0])
+            : opts.cell;
           pool.set(i, pos.x, pos.y, pos.z, vx, vy, vz, cr, cg, cb,
-            time, life, psz, gravity, drag, twinkle);
+            time, life, psz, gravity, drag, twinkle,
+            cell, opts.stretch, undefined, shiftT, sr, sg, sb);
         } else {
           // tracer bead: dimmer, smaller, no strobe — a clean streak segment
           const fade = (1 - seg / seg1) * 0.55;
           pool.set(i, pos.x, pos.y, pos.z, vx, vy, vz,
             cr * fade, cg * fade, cb * fade,
             time + seg * lag, life * (1 - 0.1 * (seg / seg1)),
-            psz * (0.5 + 0.4 * (1 - seg / seg1)), gravity, drag, 0);
+            psz * (0.5 + 0.4 * (1 - seg / seg1)), gravity, drag, 0,
+            undefined, opts.stretch, undefined, shiftT,
+            sc ? sr * fade : undefined, sc ? sg * fade : undefined, sc ? sb * fade : undefined);
         }
       });
     };
@@ -1674,7 +1748,9 @@ export class FireworksSystem {
             0.46 * randRange(0.8, 1.3) * scale, 0.08, 1.3, flakeTw);
         } else {
           // ray tip: a strobing near-white spark that lands right where the
-          // ray dies — the bright bead ends the photo's rays all carry
+          // ray dies — the bright bead ends the photo's rays all carry.
+          // Rendered with the 6-point flare sprite so each ray finishes on a
+          // tiny lens-star, the way tips bloom in real display photos.
           const ts = life * randRange(0.78, 0.94);
           const k = (1 - Math.exp(-d * ts)) / d;
           const e = Math.exp(-d * ts);
@@ -1684,7 +1760,8 @@ export class FireworksSystem {
             vx * e * 0.5 + randRange(-0.6, 0.6), svy * 0.5 + randRange(-0.6, 0.6), vz * e * 0.5 + randRange(-0.6, 0.6),
             tr * 7.2 * bright, tg * 7.2 * bright, tb * 7.2 * bright,
             time + ts, randRange(0.45, 0.85),
-            0.24 * randRange(0.8, 1.25) * scale, 0.15, 1.2, 24);
+            0.30 * randRange(0.8, 1.25) * scale, 0.15, 1.2, 24,
+            CELL.STAR6, 0);
         }
       });
     };
@@ -1696,6 +1773,37 @@ export class FireworksSystem {
     const slowGrandDrag = (base) => Math.max(0.28, base - grand * 0.24);
     const wideGrandSpeed = (base) => base * (1 + grand * 0.22);
 
+    /** A trailed ring of stars in the plane perpendicular to nVec. */
+    const spawnRing = (nVec, count, speed) => {
+      const uAxis = _v2.crossVectors(nVec, Math.abs(nVec.y) < 0.9 ? UP : X_AXIS).normalize();
+      const vAxis = _v3.crossVectors(nVec, uAxis).normalize();
+      const rDrag = slowGrandDrag(0.7);
+      let rj = -1, rvx, rvy, rvz, rLife, rLag;
+      pool.spawn(count * 3, (i) => {
+        rj++;
+        const seg = rj % 3;
+        if (seg === 0) {
+          const a = (rj / (count * 3)) * Math.PI * 2 + Math.random() * 0.05;
+          const dx = uAxis.x * Math.cos(a) + vAxis.x * Math.sin(a);
+          const dy = uAxis.y * Math.cos(a) + vAxis.y * Math.sin(a);
+          const dz = uAxis.z * Math.cos(a) + vAxis.z * Math.sin(a);
+          const sp = speed * randRange(0.95, 1.05);
+          rvx = dx * sp + dvx; rvy = dy * sp + dvy; rvz = dz * sp + dvz;
+          rLife = (randRange(1.8, 2.4) + size * 0.6) * grandLife;
+          rLag = randRange(0.022, 0.036);
+          pool.set(i, pos.x, pos.y, pos.z, rvx, rvy, rvz,
+            colA.r * 5.7 * glow, colA.g * 5.7 * glow, colA.b * 5.7 * glow,
+            time, rLife, 0.19 * grandPSize, 0.3, rDrag, 0);
+        } else {
+          const fade = (1 - seg / 3) * 0.55;
+          pool.set(i, pos.x, pos.y, pos.z, rvx, rvy, rvz,
+            colA.r * 5.7 * glow * fade, colA.g * 5.7 * glow * fade, colA.b * 5.7 * glow * fade,
+            time + seg * rLag, rLife * 0.95,
+            0.19 * grandPSize * (0.5 + 0.4 * (1 - seg / 3)), 0.3, rDrag, 0);
+        }
+      });
+    };
+
     switch (pattern) {
       case 'peony':
         spawnSphere(spec.count ?? Math.round((310 + 720 * size) * grandCount), spec.speed ?? wideGrandSpeed(12 + 14 * size), {
@@ -1703,6 +1811,14 @@ export class FireworksSystem {
           psize: 0.23 * grandPSize, trail: 2,
         });
         spawnSphere(Math.round((120 + 230 * size) * grandCount), 7 + 8 * size, { life: 1.6 * grandLife, psize: 0.13 * grandPSize, drag: slowGrandDrag(0.7) });
+        // ~40% of peonies carry a pistil: a slow contrast-color heart inside
+        // the sphere, the way real ball shells are often built two-stage
+        if (Math.random() < 0.4) {
+          spawnSphere(Math.round((90 + 150 * size) * grandCount), (4 + 5 * size), {
+            shellSkin: true, color: 'b', life: 1.9 * grandLife, drag: 0.8, gravity: 0.3,
+            psize: 0.28 * grandPSize, brightness: glow * 0.8, whiteCore: 0.02,
+          });
+        }
         break;
 
       case 'dahlia': {
@@ -1737,9 +1853,10 @@ export class FireworksSystem {
         break;
 
       case 'willow':
+        // long shutter: the drooping branches smear into molten threads
         spawnSphere(Math.round((220 + 440 * size) * grandCount), wideGrandSpeed(8 + 9 * size), {
           shellSkin: true, life: (3.8 + size * 1.4) * grandLife, drag: slowGrandDrag(0.4), gravity: 0.4, psize: 0.14 * grandPSize,
-          trail: 4,
+          trail: 4, stretch: 0.035,
         });
         break;
 
@@ -1783,35 +1900,20 @@ export class FireworksSystem {
       case 'ring': {
         // ring in a random plane
         const n = _v1.set(randRange(-1, 1), randRange(-0.4, 0.4), randRange(-1, 1)).normalize();
-        const uAxis = _v2.crossVectors(n, Math.abs(n.y) < 0.9 ? UP : new THREE.Vector3(1, 0, 0)).normalize();
-        const vAxis = _v3.crossVectors(n, uAxis).normalize();
-        const count = spec.count ?? Math.round((230 + 320 * size) * grandCount);
-        const speed = spec.speed ?? wideGrandSpeed(14 + 14 * size);
-        const rDrag = slowGrandDrag(0.7);
-        let rj = -1, rvx, rvy, rvz, rLife, rLag;
-        pool.spawn(count * 3, (i) => {
-          rj++;
-          const seg = rj % 3;
-          if (seg === 0) {
-            const a = (rj / (count * 3)) * Math.PI * 2 + Math.random() * 0.05;
-            const dx = uAxis.x * Math.cos(a) + vAxis.x * Math.sin(a);
-            const dy = uAxis.y * Math.cos(a) + vAxis.y * Math.sin(a);
-            const dz = uAxis.z * Math.cos(a) + vAxis.z * Math.sin(a);
-            const sp = speed * randRange(0.95, 1.05);
-            rvx = dx * sp + dvx; rvy = dy * sp + dvy; rvz = dz * sp + dvz;
-            rLife = (randRange(1.8, 2.4) + size * 0.6) * grandLife;
-            rLag = randRange(0.022, 0.036);
-            pool.set(i, pos.x, pos.y, pos.z, rvx, rvy, rvz,
-              colA.r * 5.7 * glow, colA.g * 5.7 * glow, colA.b * 5.7 * glow,
-              time, rLife, 0.19 * grandPSize, 0.3, rDrag, 0);
-          } else {
-            const fade = (1 - seg / 3) * 0.55;
-            pool.set(i, pos.x, pos.y, pos.z, rvx, rvy, rvz,
-              colA.r * 5.7 * glow * fade, colA.g * 5.7 * glow * fade, colA.b * 5.7 * glow * fade,
-              time + seg * rLag, rLife * 0.95,
-              0.19 * grandPSize * (0.5 + 0.4 * (1 - seg / 3)), 0.3, rDrag, 0);
-          }
+        spawnRing(n, spec.count ?? Math.round((230 + 320 * size) * grandCount),
+          spec.speed ?? wideGrandSpeed(14 + 14 * size));
+        break;
+      }
+
+      case 'saturn': {
+        // the classic Saturn shell: a tight contrast-color peony core with a
+        // flat ring orbiting it, the ring plane tilted a little off level
+        spawnSphere(Math.round((140 + 240 * size) * grandCount), 5.5 + 6.5 * size, {
+          shellSkin: true, color: 'b', life: 2.0 * grandLife, drag: 0.75, gravity: 0.3,
+          psize: 0.25 * grandPSize, trail: 1, whiteCore: 0.03,
         });
+        const n = _v1.set(randRange(-0.35, 0.35), 1, randRange(-0.35, 0.35)).normalize();
+        spawnRing(n, Math.round((250 + 310 * size) * grandCount), wideGrandSpeed(15 + 15 * size));
         break;
       }
 
@@ -1840,16 +1942,22 @@ export class FireworksSystem {
       }
 
       case 'crackle':
+        // a third of the stars render as branchy micro-bursts (a real
+        // crackle-burst sprite, randomly rolled) — the frying-pan look
         spawnSphere(Math.round((400 + 760 * size) * grandCount), wideGrandSpeed(12 + 15 * size), {
           shellSkin: true, life: (2.4 + size) * grandLife, drag: slowGrandDrag(0.85), gravity: 0.45,
           twinkle: 55, psize: 0.15 * grandPSize, whiteCore: 0.5,
+          cell: [CELL.STAR4, CELL.CRACKLE, 0.35],
         });
         break;
 
       case 'strobe':
+        // slow blinkers get the 4-point cross sprite: from the campsite the
+        // shell hangs as a cloud of winking star-crosses, like real strobe
         spawnSphere(Math.round((320 + 570 * size) * grandCount), wideGrandSpeed(11 + 13 * size), {
           shellSkin: true, life: (3.0 + size) * grandLife, drag: slowGrandDrag(0.9), gravity: 0.3,
-          twinkle: 11, psize: 0.18 * grandPSize, whiteCore: 0.3,
+          twinkle: 11, psize: 0.20 * grandPSize, whiteCore: 0.3,
+          cell: CELL.STAR4, stretch: 0,
         });
         break;
 
@@ -1930,6 +2038,7 @@ export class FireworksSystem {
         spawnSphere(Math.round((230 + 260 * size) * grandCount), 3.5 + 3.5 * size, {
           flatten: 0.32, life: (4.8 + 1.8 * size) * grandLife, drag: 0.32, gravity: 0.55,
           psize: 0.15 * grandPSize, trail: 5, whiteCore: 0.35, brightness: glow * 1.15,
+          stretch: 0.05, // pouring, not falling — the long shutter sells it
         });
         // shimmer threaded through the curtain — molten flakes strobing
         spawnSphere(Math.round(90 + 130 * size), 2.5 + 2 * size, {
@@ -1940,11 +2049,14 @@ export class FireworksSystem {
       }
 
       case 'salute': {
-        // a report shell: one blinding white flash-bang, almost no stars
+        // a report shell: one blinding white flash-bang, almost no stars —
+        // plus a single huge 6-point flare frame right at the detonation
         spawnSphere(Math.round(110 + 90 * size), 16 + 10 * size, {
           life: 0.34, drag: 0.55, gravity: 0.2,
           psize: 0.3 * grandPSize, whiteCore: 1, brightness: 2.3,
         });
+        pool.spawn(1, (i) => pool.set(i, pos.x, pos.y, pos.z, 0, 0.5, 0,
+          9.2, 9.0, 8.4, time, 0.24, 2.4 * grandPSize, 0, 0.5, 0, CELL.STAR6, 0));
         break;
       }
 
@@ -1955,13 +2067,113 @@ export class FireworksSystem {
         const pal2 = randPick(PALETTES);
         this.schedule(0.5, () => {
           this.burst(_v1.copy(pos).add(_v2.set(randRange(-10, 10), randRange(-2, 7), randRange(-10, 10))).clone(), {
-            pattern: randPick(['ring', 'dahlia', 'serpents']), size: size * 0.78, palette: pal2, sound: 'med',
+            pattern: randPick(['ring', 'dahlia', 'serpents', 'ghost']), size: size * 0.78, palette: pal2, sound: 'med',
           });
         });
         this.schedule(1.0, () => {
           this.burst(_v1.copy(pos).add(_v2.set(randRange(-11, 11), randRange(-6, 4), randRange(-11, 11))).clone(), {
-            pattern: randPick(['crackle', 'brocade']), size: size * 0.66, palette: pal2, sound: 'med',
+            pattern: randPick(['crackle', 'brocade', 'timerain']), size: size * 0.66, palette: pal2, sound: 'med',
           });
+        });
+        break;
+      }
+
+      case 'kamuro': {
+        // the crown jewel of Japanese shells: a dense gold crown that opens
+        // slow, hangs, then pours toward the ground in strobing glitter —
+        // the long-life rays droop under gravity and blink as they fall
+        spawnRays(Math.min(360, Math.round(120 + 130 * size + 52 * grand)), wideGrandSpeed(9.5 + 10.5 * size), {
+          life: (4.4 + 1.7 * size) * grandLife, drag: slowGrandDrag(0.34), gravity: 0.52,
+          flakes: Math.round(24 + 12 * Math.min(size, 1.6)), tipSparkle: true,
+          flakeTwinkle: 21, flakeBright: 2.5, flakeTint: 0.35, psize: 0.17 * grandPSize,
+        });
+        // silver-white glitter dust threaded through the crown
+        spawnSphere(Math.round((140 + 220 * size) * grandCount), 6 + 6 * size, {
+          life: 2.8 * grandLife, drag: 0.6, gravity: 0.42,
+          psize: 0.12 * grandPSize, twinkle: 26, whiteCore: 0.65,
+        });
+        break;
+      }
+
+      case 'ghost': {
+        // relay-star peony: every star burns the first composition, then the
+        // second catches with a hot little pop and the whole sphere blinks
+        // over to a different color mid-fall — the "ghost shell" magic trick
+        const pal2 = spec.palette2 ?? randPick(PALETTES);
+        const to = pal2.a === palette.a ? palette.b : pal2.a;
+        spawnSphere(spec.count ?? Math.round((300 + 640 * size) * grandCount), spec.speed ?? wideGrandSpeed(11 + 13 * size), {
+          shellSkin: true, color: 'a', life: (2.6 + 1.2 * size) * grandLife, drag: slowGrandDrag(0.55), gravity: 0.35,
+          psize: 0.23 * grandPSize, trail: 2, whiteCore: 0,
+          shift: { color: to, t: 0.44 },
+        });
+        // inner dust holds the first color a beat longer, so the change
+        // sweeps outward-in like a real relay taking light
+        spawnSphere(Math.round((110 + 200 * size) * grandCount), 6 + 7 * size, {
+          life: 1.9 * grandLife, psize: 0.13 * grandPSize, drag: 0.7, color: 'a',
+          shift: { color: to, t: 0.62 }, whiteCore: 0,
+        });
+        break;
+      }
+
+      case 'horsetail': {
+        // a handful of heavy long-burn comets lobbed gently up — almost no
+        // break, just molten tails surrendering to gravity, pouring down in
+        // thick smeared strands (single-shell cousin of the waterfall)
+        spawnSphere(Math.round((70 + 90 * size) * grandCount), 3.6 + 3.2 * size, {
+          hemisphereBias: true, life: (4.4 + 1.6 * size) * grandLife, drag: 0.4, gravity: 0.6,
+          psize: 0.24 * grandPSize, trail: 6, whiteCore: 0.15, stretch: 0.045,
+          brightness: glow * 1.1,
+        });
+        // sizzling flecks shed off the falling tails
+        spawnSphere(Math.round(90 + 120 * size), 2.6 + 2 * size, {
+          hemisphereBias: true, life: (3.4 + size) * grandLife, drag: 0.5, gravity: 0.55,
+          psize: 0.1 * grandPSize, twinkle: 24, whiteCore: 0.4,
+        });
+        break;
+      }
+
+      case 'leaves': {
+        // falling leaves: featherweight relay embers that all but stop in
+        // the air, then flutter down for ages, each one slowly blinking from
+        // one color to another as it tumbles — an eerie, quiet shell
+        const pal2 = randPick(PALETTES);
+        const to = pal2.a === palette.a ? palette.b : pal2.a;
+        spawnSphere(Math.round((170 + 260 * size) * grandCount), 6 + 6 * size, {
+          life: (5.4 + 1.4 * size) * grandLife, drag: 1.15, gravity: 0.14,
+          psize: 0.17 * grandPSize, twinkle: 7,
+          shift: { color: to, t: 0.5 }, stretch: 0,
+        });
+        break;
+      }
+
+      case 'timerain': {
+        // time-rain: a golden sphere whose wake keeps POPPING after the
+        // stars die — delayed micro-charges precomputed along each fall
+        // path (closed-form ballistics, zero runtime cost), so 6-point
+        // glitter keeps igniting out of the black for seconds afterward
+        const trSpeed = wideGrandSpeed(10 + 12 * size);
+        spawnSphere(Math.round((240 + 420 * size) * grandCount), trSpeed, {
+          shellSkin: true, life: (2.4 + size) * grandLife, drag: slowGrandDrag(0.5), gravity: 0.45,
+          psize: 0.18 * grandPSize, trail: 3,
+        });
+        const drops = Math.round((260 + 380 * size) * grandCount);
+        const dDrag = 0.5, gA = 9.81 * 0.45;
+        const maxT = (2.6 + size) * grandLife;
+        pool.spawn(drops, (i) => {
+          const u = Math.random() * 2 - 1;
+          const a = Math.random() * Math.PI * 2;
+          const rr = Math.sqrt(1 - u * u);
+          const sp = trSpeed * randRange(0.4, 1.0);
+          const vx = rr * Math.cos(a) * sp + dvx, vy = u * sp + dvy, vz = rr * Math.sin(a) * sp + dvz;
+          const ts = randRange(0.5, maxT);
+          const k = (1 - Math.exp(-dDrag * ts)) / dDrag;
+          pool.set(i,
+            pos.x + vx * k, pos.y + vy * k - gA * (ts - k) / dDrag, pos.z + vz * k,
+            randRange(-0.8, 0.8), randRange(-0.6, 0.6), randRange(-0.8, 0.8),
+            7.0 * glow, 6.4 * glow, 4.6 * glow,
+            time + ts, randRange(0.1, 0.3),
+            0.2 * randRange(0.7, 1.3) * (0.6 + size * 0.7), 0.2, 1.4, 0,
+            CELL.STAR6, 0);
         });
         break;
       }
@@ -1974,7 +2186,8 @@ export class FireworksSystem {
     // sits this out too — white dust inside it would dilute the saturated
     // rays that ARE the look, and its ray tips already sparkle.
     const selfTwinkling = pattern === 'chrys' || pattern === 'crackle' || pattern === 'strobe'
-      || pattern === 'dahlia';
+      || pattern === 'dahlia' || pattern === 'kamuro' || pattern === 'timerain'
+      || pattern === 'leaves' || pattern === 'ghost' || pattern === 'horsetail';
     if (!selfTwinkling && size >= 0.4) {
       spawnSphere(Math.round((140 + 300 * size) * grandCount), wideGrandSpeed(9 + 11 * size), {
         life: (2.3 + size * 0.9) * grandLife, drag: slowGrandDrag(0.75), gravity: 0.32,
@@ -2263,7 +2476,7 @@ export class FireworksSystem {
             pool.set(idx,
               a.x + randRange(-0.1, 0.1), a.y + 0.08, a.z + randRange(-0.1, 0.1),
               randRange(-0.3, 0.3), randRange(0.3, 0.7), randRange(-0.3, 0.3),
-              0.05, 0.05, 0.058,
+              0.40, 0.40, 0.44,
               time, randRange(4, 8),
               randRange(0.4, 0.8), -0.015, 1.4, -1);
           });
@@ -2359,5 +2572,25 @@ export class FireworksSystem {
     this.flashSprites.update(dt);
     // basin wash from recent bursts dies off quickly (half-life ~150ms)
     this.ambientPulse.energy *= Math.exp(-4.6 * dt);
+
+    // feed the particle shader's smoke lighting: the strongest live flash
+    // plus the basin-wide burst wash — this is what makes every shell light
+    // its own smoke from inside, and old smoke bloom when a new one breaks
+    const u = this.pool.uniforms;
+    if (u?.uFlashPos) {
+      let best = null;
+      for (const s of this.flashes.lights) {
+        if (s.peak > 0 && (!best || s.light.intensity > best.light.intensity)) best = s;
+      }
+      if (best) {
+        const p = best.light.position;
+        u.uFlashPos.value.set(p.x, p.y, p.z, best.light.intensity);
+        u.uFlashColor.value.copy(best.light.color);
+      } else {
+        u.uFlashPos.value.w = 0;
+      }
+      u.uSmokePulse.value.copy(this.ambientPulse.color)
+        .multiplyScalar(this.ambientPulse.energy * 0.5);
+    }
   }
 }
