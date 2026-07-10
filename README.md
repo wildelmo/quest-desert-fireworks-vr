@@ -40,6 +40,31 @@ gold **time-rain** whose glitter keeps popping long after the stars die, then an
 escalating barrage and a salute chain to close. The handle springs back up when the
 desert goes quiet, ready to go again.
 
+## The Colossus
+
+![the colossus](docs/colossus.png)
+
+Look west-northwest from camp — past the telegraph poles marching down the old
+service track — and there it is: **a grand fire-wheel on the scale of the London
+Eye**. A hundred and four meters of segmented lattice rim on a 68 m hub, A-frame
+legs, stay cables, eight car-sized rocket-driver pods, and two rings of gas
+lamps that wheel slowly against the stars. It runs its own program all night:
+the banks catch pair by pair with distant *whoomphs*, half a minute of shuddering
+take-up as the drive fights a hundred tons of inertia, then full glory — combed
+arcs of fire pouring off the rim, the dunes around its feet washed in whatever
+color it's burning, salutes cracking off the top of the arc. When the drivers
+die it freewheels in the dark for minutes, embers cooling on the pods.
+
+It's built to *feel* far and huge rather than just be large in world units:
+real distance (280 m — walking around camp barely moves it against the sky),
+one revolution every ~20 seconds at full spin (the handheld pinwheel turns a
+hundred times faster), its own gunpowder plume and dust bank to haze the far
+rim, a light-pollution halo, human-scale reference at its foot (a keeper's
+shed with one lit window), and true speed-of-sound audio — **from camp, a
+salute flashes a full beat before the boom arrives**. Walk the quarter mile
+and the roar turns from a bass mountain into a furnace, the bearings groan
+under the load, and you have to crane your neck to find the top.
+
 ## The lounge
 
 ![lounge](docs/lounge.png)
@@ -148,6 +173,13 @@ To audition any recipe without a headset: `node tools/render-sounds.mjs out whoo
 - Burst flash lights are pooled `PointLight`s that paint the dunes with the shell's
   color (fountain lights are pooled too — changing the scene's light count mid-show
   forces a shader recompile hitch on Quest, so the light count never changes).
+- The Colossus (`src/colossus.js`) is ~25 draw calls and ~12k triangles: every truss
+  member is an instanced bar, the marker lamps are two shader-driven point clouds,
+  and its fires ride the shared particle pool. Its spin integrates drive torque
+  against quadratic aero drag, so spin-up takes half a minute and coast-down takes
+  minutes. One permanent extra `PointLight` carries its glow, its roar/groans are
+  synthesized like everything else (`renderColossusLoop`, `renderGroan`), and a
+  steady fire-light slot in the particle shader lets it light its own smoke plume.
 - The lounge furniture (`src/props.js`) is the one non-procedural set dressing: seven
   scanned-product GLBs from the Amazon Berkeley Objects dataset, batch-optimized with
   glTF-Transform (textures 4096→1024px re-encoded as WebP, meshes quantized) so the

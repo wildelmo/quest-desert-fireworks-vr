@@ -820,6 +820,142 @@ export function renderPinwheelLoop(ctx, seed = 1) {
 }
 
 // ---------------------------------------------------------------------------
+// The Colossus — the monumental fire-wheel's driver banks at full burn
+// (seamless loop). This is NOT the hand pinwheel scaled up: at a hundred
+// meters of wheel there is no swish-swish, just the massed roar of many
+// rocket motors — a rocket-test-stand rumble. Anatomy: a deep brown-noise
+// mass with two slow undulations riding it (integer cycles per loop so the
+// seam can't hiccup), a mid "furnace breath" band, and a sparse sizzle of
+// burning composition. The game scales gain with how many banks are lit and
+// walks a lowpass with listener distance, so from camp it's a soft mountain
+// of bass and up close it's a furnace.
+export function renderColossusLoop(ctx, seed = 1) {
+  const sr = ctx.sampleRate;
+  const fadeSec = 0.25;
+  const period = 3.2;            // trimmed loop length after makeSeamless
+  const dur = period + fadeSec;
+  const N = Math.floor(dur * sr);
+  const rand = mulberry32(seed * 9377 + 41);
+  let M = new Float32Array(N);
+
+  // undulators must complete whole cycles over the trimmed period
+  const f1 = 2 / period, f2 = 7 / period;
+  const ph1 = rand() * TWO_PI, ph2 = rand() * TWO_PI;
+
+  let b = 0, lpDeep = 0, mid1 = 0, mid2 = 0, hpMid = 0;
+  const leak = 0.997;
+  const aDeep = lpCoef(110, sr);
+  const aMid = lpCoef(620, sr);
+  const aHpMid = lpCoef(170, sr);
+  for (let i = 0; i < N; i++) {
+    const t = i / sr;
+    const x = rand() * 2 - 1;
+    // the mass: leaky-integrated (brown) noise, lowpassed hard
+    b = b * leak + x * 0.05;
+    lpDeep = aDeep * lpDeep + (1 - aDeep) * b;
+    // slow rolling of the whole bank — two incommensurate-feeling rates
+    const roll = 0.72 + 0.20 * Math.sin(TWO_PI * f1 * t + ph1)
+      + 0.12 * Math.sin(TWO_PI * f2 * t + ph2);
+    // furnace breath: a 170-620 Hz band that flutters faster than the roll
+    mid1 = aMid * mid1 + (1 - aMid) * x;
+    mid2 = aMid * mid2 + (1 - aMid) * mid1;
+    hpMid = aHpMid * hpMid + (1 - aHpMid) * mid2;
+    M[i] = lpDeep * 9.0 * roll + (mid2 - hpMid) * 1.1 * (0.55 + 0.45 * roll);
+  }
+
+  // composition sizzle: stationary Poisson rain of tiny bright snaps —
+  // loop-safe as-is, and what tells your ear "burning metal", not "wind"
+  let ts = 0;
+  while (ts < dur) {
+    ts += -Math.log(1 - rand()) / 70;
+    const i0 = Math.floor(ts * sr);
+    if (i0 >= N) break;
+    const tau = 0.0008 + rand() * 0.0025;
+    const f = 2100 + rand() * 4800;
+    const aLoC = lpCoef(f, sr), aHiC = lpCoef(f * 0.32, sr);
+    const amp = (0.10 + rand() * 0.22);
+    let lo = 0, hi = 0;
+    const len = Math.min(N - i0, Math.floor(tau * 7 * sr));
+    for (let k = 0; k < len; k++) {
+      const xx = rand() * 2 - 1;
+      lo = aLoC * lo + (1 - aLoC) * xx;
+      hi = aHiC * hi + (1 - aHiC) * xx;
+      M[i0 + k] += (lo - hi) * Math.exp(-(k / sr) / tau) * amp;
+    }
+  }
+
+  M = makeSeamless(M, sr, fadeSec);
+  normalize([M], 0.6);
+  return toBuffer(ctx, [M], sr);
+}
+
+// ---------------------------------------------------------------------------
+// Colossus bearing groan — a hundred tons easing over a plain bearing. A
+// two-pole resonance swept slowly DOWN (mass settling, never up — up reads
+// as a question mark) over stick-slip brown noise: the drive is gated at a
+// slipping rate that itself decelerates, which is what a heavy shaft
+// actually sounds like as it grabs. Ends in a soft wooden settle. Played
+// only near the wheel, quiet, rate-randomized.
+export function renderGroan(ctx, seed = 1) {
+  const sr = ctx.sampleRate;
+  const dur = 1.7;
+  const N = Math.floor(dur * sr);
+  const rand = mulberry32(seed * 5501 + 77);
+  const M = new Float32Array(N);
+
+  const f0 = 150 + rand() * 60;   // start pitch of the complaint
+  const f1 = 55 + rand() * 20;    // where it settles
+  let y1 = 0, y2 = 0, b = 0, lp = 0;
+  const aDrv = lpCoef(900, sr);
+  let slipPhase = rand();
+  // pass 1: the raw ring. A two-pole this low has enormous, sweep-dependent
+  // gain, so level is set afterward by measuring — clipping the raw ring
+  // flattens the whole groan into a kazoo plateau.
+  let rawPeak = 1e-6;
+  for (let i = 0; i < N; i++) {
+    const t = i / sr;
+    const n = t / dur;
+    // stick-slip gate: pulse train decelerating 13 -> 5 Hz, soft-edged
+    const slipRate = 13 - 8 * n;
+    slipPhase += slipRate / sr;
+    const g = Math.pow(0.5 + 0.5 * Math.sin(TWO_PI * slipPhase), 3.0);
+    // drive: brown-ish noise, gated by the slipping
+    b = b * 0.995 + (rand() * 2 - 1) * 0.06;
+    lp = aDrv * lp + (1 - aDrv) * b;
+    const drive = lp * (0.25 + 0.75 * g) * 0.01;
+    // swept resonance (modest r — a violin-tight Q would ring metallic)
+    const fc = f0 + (f1 - f0) * Math.min(1, n * 1.4);
+    const r = 0.988;
+    const th = TWO_PI * fc / sr;
+    const y = 2 * r * Math.cos(th) * y1 - r * r * y2 + drive;
+    y2 = y1; y1 = y;
+    M[i] = y;
+    const ab = Math.abs(y);
+    if (ab > rawPeak) rawPeak = ab;
+  }
+  // pass 2: mild saturation at a known level, THEN the envelope — it leans
+  // in, complains, and dies before the buffer does
+  for (let i = 0; i < N; i++) {
+    const t = i / sr;
+    const env = Math.min(1, t / 0.14) * Math.exp(-Math.max(0, t - 0.9) / 0.28);
+    M[i] = softClip((M[i] / rawPeak) * 1.25, 1.1) * env;
+  }
+  // the settle: one soft low knock as the load comes to rest
+  {
+    const i0 = Math.floor((dur - 0.45) * sr);
+    const a = lpCoef(190, sr);
+    let k1 = 0;
+    for (let k = 0; k < Math.floor(0.12 * sr) && i0 + k < N; k++) {
+      const t = k / sr;
+      k1 = a * k1 + (1 - a) * (rand() * 2 - 1);
+      M[i0 + k] += k1 * Math.exp(-t / 0.03) * 1.1;
+    }
+  }
+  normalize([M], 0.5);
+  return toBuffer(ctx, [M], sr);
+}
+
+// ---------------------------------------------------------------------------
 // Roman candle / cake single shot — compact "pop-foomp": a small quick blast
 // pulse with a breathy mid puff behind it. Snappier and brighter than the
 // mortar lift, but still all pressure and air, no ringing.

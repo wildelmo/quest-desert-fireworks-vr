@@ -99,6 +99,8 @@ const VERT = /* glsl */`
   uniform vec3 uSmokePulse;   // basin-wide burst wash (color * energy)
   uniform vec4 uFlashPos;     // strongest live flash light: xyz, w = intensity
   uniform vec3 uFlashColor;
+  uniform vec4 uFirePos;      // steady long-lived fire (the colossus): xyz, w
+  uniform vec3 uFireColor;
 
   varying vec3 vColor;
   varying float vAlpha;
@@ -151,8 +153,11 @@ const VERT = /* glsl */`
       // basin burst-wash, and the strongest live flash (inverse-square-ish)
       vec3 toFlash = uFlashPos.xyz - pos;
       float dist2 = dot(toFlash, toFlash);
+      vec3 toFire = uFirePos.xyz - pos;
+      float fire2 = dot(toFire, toFire);
       vec3 lit = uSmokeAmbient + uSmokePulse * 0.55
-               + uFlashColor * (uFlashPos.w / (60.0 + dist2 * 0.55));
+               + uFlashColor * (uFlashPos.w / (60.0 + dist2 * 0.55))
+               + uFireColor * (uFirePos.w / (400.0 + fire2 * 0.15));
       vColor = aColor * lit;
       vSmoke = 1.0;
     } else {
@@ -306,6 +311,9 @@ export class ParticlePool {
       uSmokePulse: { value: new THREE.Color(0, 0, 0) },
       uFlashPos: { value: new THREE.Vector4(0, -1000, 0, 0) },
       uFlashColor: { value: new THREE.Color(1, 1, 1) },
+      // steady fire slot (fed by the colossus; w=0 means "off")
+      uFirePos: { value: new THREE.Vector4(0, -1000, 0, 0) },
+      uFireColor: { value: new THREE.Color(1, 0.6, 0.3) },
     };
 
     const mat = new THREE.ShaderMaterial({
