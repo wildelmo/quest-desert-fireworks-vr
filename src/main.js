@@ -199,27 +199,6 @@ if (params.get('autostart') === 'desktop' || params.get('demo')) {
   setTimeout(() => startDesktop(false), 50);
 }
 
-// ?droneshow=1: press the drone console shortly after start and aim the
-// view at the staging area — QA/screenshot hook, like ?demo for fireworks
-let droneKick = params.get('droneshow') ? 1.2 : 0;
-
-function kickDroneShow() {
-  world.droneConsole.autoPress();
-  const c = world.droneShow.center;
-  const dx = c.x - player.position.x;
-  const dz = c.z - player.position.z;
-  const yaw = Math.atan2(-dx, -dz);
-  const pitch = Math.atan2(c.y - 1.65, Math.hypot(dx, dz)) * 0.9;
-  if (interactions.desktop) {
-    interactions.desktop.yaw = yaw;
-    interactions.desktop.pitch = pitch;
-  } else {
-    player.rotation.y = yaw;
-    camera.rotation.x = pitch;
-  }
-  if (demo) demo.orbit = false; // hold the shot on the swarm
-}
-
 // expose for tests / tinkering
 window.__app = { scene, camera, player, renderer, fireworks, world, audio, pool, interactions, THREE };
 
@@ -243,10 +222,6 @@ renderer.setAnimationLoop(() => {
   fireworks.update(dt, time);
   interactions.update(dt, time);
   if (demo) demoUpdate(dt, time);
-  if (droneKick > 0) {
-    droneKick -= dt;
-    if (droneKick <= 0) kickDroneShow();
-  }
 
   // gl_PointSize is in framebuffer pixels — in XR that's the eye buffer,
   // not the mirror canvas
@@ -256,7 +231,6 @@ renderer.setAnimationLoop(() => {
     fbHeight = layer?.framebufferHeight ?? layer?.textureHeight ?? fbHeight;
   }
   pool.update(time, fbHeight);
-  world.droneShow.setViewHeight(fbHeight); // drone LEDs size like pool sparks
   audio.updateListener(renderer.xr.isPresenting ? renderer.xr.getCamera() : camera);
 
   renderer.render(scene, camera);
