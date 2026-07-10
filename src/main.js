@@ -10,7 +10,7 @@ import { FireworksSystem } from './fireworks.js';
 import { createWorld } from './world.js';
 import { COLOSSUS_POS } from './colossus.js';
 import { Interactions, XRHand, DesktopControls } from './input.js';
-import { randRange, randPick } from './utils.js';
+import { randRange, randPick, clamp } from './utils.js';
 
 const params = new URLSearchParams(location.search);
 
@@ -21,7 +21,14 @@ const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'hi
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.xr.enabled = true;
-renderer.xr.setFoveation(1.0);
+// fixed foveated rendering OFF by default (three.js defaults it to 1.0):
+// FFR's screen-fixed tile boundaries are glaring on this content — thin
+// bright lattice and soft glows on near-black sky — showing up as a dark
+// seam that sweeps the Colossus when you tilt your head, and a vertical
+// resolution step at the lens edge. The scene is cheap enough to render
+// the periphery at full res; ?foveation=0..1 opts back in on weak GPUs.
+const foveation = parseFloat(params.get('foveation'));
+renderer.xr.setFoveation(Number.isFinite(foveation) ? clamp(foveation, 0, 1) : 0);
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.1;
 // real moon shadows over the campsite (?shadows=0 to opt out on weak GPUs);
