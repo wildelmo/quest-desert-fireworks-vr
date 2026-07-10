@@ -11,6 +11,7 @@ import {
   renderFountainLoop, renderPinwheelLoop, renderShot, renderTorchLoop,
   renderWindLoop, renderThud, renderTick, renderDesertIR,
   renderFirecrackerLoop, renderCrackerPop, renderWaterfallLoop,
+  renderColossusLoop, renderGroan,
 } from './synth.js';
 
 const SPEED_OF_SOUND = 340;
@@ -107,6 +108,8 @@ export class AudioEngine {
     variants('firecrackers', 2, (s) => renderFirecrackerLoop(ctx, s));
     variants('cracker', 4, (s) => renderCrackerPop(ctx, s));
     variants('waterfall', 2, (s) => renderWaterfallLoop(ctx, s));
+    variants('colossus', 2, (s) => renderColossusLoop(ctx, s));
+    variants('groan', 3, (s) => renderGroan(ctx, s));
     variants('torch', 1, (s) => renderTorchLoop(ctx, s));
     variants('wind', 1, (s) => renderWindLoop(ctx, s));
     variants('thud', 2, (s) => renderThud(ctx, s));
@@ -206,12 +209,13 @@ export class AudioEngine {
     gain.gain.value = opts.gain ?? 1;
 
     let head = src;
+    let lpNode = null;
     if (opts.lowpass) {
-      const lp = ctx.createBiquadFilter();
-      lp.type = 'lowpass';
-      lp.frequency.value = opts.lowpass;
-      head.connect(lp);
-      head = lp;
+      lpNode = ctx.createBiquadFilter();
+      lpNode.type = 'lowpass';
+      lpNode.frequency.value = opts.lowpass;
+      head.connect(lpNode);
+      head = lpNode;
     }
     head.connect(gain);
     gain.connect(panner);
@@ -250,6 +254,11 @@ export class AudioEngine {
       },
       setRate(v) {
         src.playbackRate.setTargetAtTime(v, ctx.currentTime, 0.08);
+      },
+      // only live when the sound was started with a lowpass — long-lived
+      // loops (the colossus roar) re-tilt as the listener walks nearer
+      setLowpass(v) {
+        lpNode?.frequency.setTargetAtTime(v, ctx.currentTime, 0.15);
       },
     };
     src.onended = () => {

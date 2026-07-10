@@ -7,6 +7,7 @@ import { createTerrain, terrainHeight, terrainNormal } from './terrain.js';
 import { createSky, createNightEnvMap, MOON_DIR } from './sky.js';
 import { FinaleShow } from './show.js';
 import { createLounge } from './props.js';
+import { createColossus } from './colossus.js';
 import { mulberry32, randRange, clamp } from './utils.js';
 
 const WOOD = 0x6b5236;
@@ -801,6 +802,10 @@ export function createWorld(scene, fireworks, pool, audio) {
   // the spectator lounge behind spawn — scanned furniture, streams in async
   const lounge = createLounge(scene, terrainHeight, contactShadow);
 
+  // THE COLOSSUS — the monumental fire-wheel out west, running its own
+  // program all night (see colossus.js for how it earns its size)
+  const colossus = createColossus(scene, fireworks, pool, audio);
+
   return {
     sky,
     torch,
@@ -808,9 +813,11 @@ export function createWorld(scene, fireworks, pool, audio) {
     lanternLight,
     detonator,
     show,
+    colossus,
     exitBoard: exit.board,
     update(dt, time) {
       sky.update(dt, time);
+      colossus.update(dt, time);
       restocker.update(dt);
       torch.update(dt, time, terrainHeight);
       detonator.update(dt);

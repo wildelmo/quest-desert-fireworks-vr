@@ -8,6 +8,7 @@ import { ParticlePool } from './particles.js';
 import { AudioEngine } from './audio.js';
 import { FireworksSystem } from './fireworks.js';
 import { createWorld } from './world.js';
+import { COLOSSUS_POS } from './colossus.js';
 import { Interactions, XRHand, DesktopControls } from './input.js';
 import { randRange, randPick } from './utils.js';
 
@@ -162,6 +163,12 @@ if (params.get('demo')) {
   // nearly overhead, so the default horizon view never catches them in
   // screenshots
   if (params.get('look') === 'up') camera.rotation.x = 1.05;
+  // ?look=wheel aims at the Colossus for screenshots of the big fire-wheel
+  if (params.get('look') === 'wheel') {
+    player.rotation.y = Math.atan2(-COLOSSUS_POS.x, -COLOSSUS_POS.z);
+    camera.rotation.x = 0.12;
+    demo.orbit = false;
+  }
 }
 
 const _demoQ = new THREE.Quaternion();
