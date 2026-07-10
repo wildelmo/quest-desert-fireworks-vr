@@ -1,5 +1,12 @@
 # Texture attributions
 
+- `particles/` — Seven particle sprites (billowy smoke puffs `smoke_04/07/08`,
+  star sparkles `star_06/09`, crackle branch `spark_04`, anamorphic flare
+  `flare_01`) from the [Kenney Particle Pack](https://kenney.nl/assets/particle-pack)
+  by Kenney Vleugels, **CC0** (see `particles/LICENSE.txt`). Composited into a
+  single sprite atlas at load time by `src/particles.js`; the burst flash
+  sprites use `flare_01` directly.
+
 - `milkyway_gaia_4k.jpg` — Real all-sky image of the night sky in galactic
   coordinates (equirectangular), assembled from ESA Gaia EDR3 measurements of
   ~1.8 billion stars. Credit: ESA/Gaia/DPAC, CC BY-SA 3.0 IGO

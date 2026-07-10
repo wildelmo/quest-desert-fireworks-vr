@@ -91,38 +91,42 @@ export class FinaleShow {
       }),
     };
 
-    // --- 3-17s: opening — one grand gold crown, then the sky fills ---
-    shell(2.7, 4, 'brocade', 1.7, { palette: GOLD, flightT: 3.3, speed: 62 });
+    // --- 3-17s: opening — one grand kamuro crown, then the sky fills ---
+    shell(2.7, 4, 'kamuro', 1.8, { palette: GOLD, flightT: 3.3, speed: 62 });
     shell(6.3, 2, 'peony', 1.1);
     shell(6.9, 6, 'peony', 1.1);
     for (let i = 0; i < 10; i++) {
-      shell(8.5 + i * 0.85, (i * 3 + 1) % 9, randPick(['peony', 'dahlia', 'ring', 'chrys']), randRange(0.8, 1.2));
+      shell(8.5 + i * 0.85, (i * 3 + 1) % 9, randPick(['peony', 'dahlia', 'ring', 'chrys', 'saturn']), randRange(0.8, 1.2));
     }
 
-    // --- 18-33s: color chases, left to right and back ---
+    // --- 18-33s: color chases, left to right and back — the return chase
+    // is all ghost shells, so the whole line changes color in mid-air ---
     const palA = randPick(PALETTES), palB = randPick(PALETTES);
     for (let i = 0; i < 9; i++) {
       shell(18 + i * 0.42, i, i % 2 ? 'ring' : 'peony', 0.75, { palette: i % 2 ? palB : palA });
     }
     for (let i = 0; i < 9; i++) {
-      shell(23.5 + i * 0.42, 8 - i, i % 2 ? 'peony' : 'ring', 0.75, { palette: i % 2 ? palA : palB });
+      shell(23.5 + i * 0.42, 8 - i, 'ghost', 0.75, { palette: i % 2 ? palA : palB });
     }
     shell(28.5, 4, 'crossette', 1.3);
     shell(30.2, 1, 'crossette', 1.0);
     shell(30.9, 7, 'crossette', 1.0);
 
-    // --- 34-45s: variety wave — serpents, palms, strobes ---
+    // --- 34-45s: variety wave — serpents, palms, strobes, a Saturn ---
     shell(34, 3, 'serpents', 1.2);
     shell(35.6, 5, 'palm', 1.3);
     shell(37.4, 1, 'strobe', 1.1);
-    shell(38.9, 7, 'palm', 1.3);
+    shell(38.9, 7, 'saturn', 1.3);
     shell(40.6, 4, 'serpents', 1.35);
     shell(42.4, 2, 'strobe', 1.0);
     shell(43.2, 6, 'chrys', 1.2);
 
-    // --- 46-53s: the hush — two slow golden willows, wide apart ---
+    // --- 46-53s: the hush — slow golden willows over drifting horsetails,
+    // and one eerie falling-leaves shell blinking between colors ---
     shell(46.5, 2, 'willow', 1.6, { palette: GOLD, flightT: 3.2, speed: 58 });
+    shell(48.2, 4, 'horsetail', 1.2, { palette: GOLD, flightT: 2.8, speed: 50 });
     shell(49.5, 6, 'willow', 1.6, { palette: GOLD, flightT: 3.2, speed: 58 });
+    shell(51.5, 4, 'leaves', 1.1, { flightT: 3.0, speed: 54 });
 
     // --- 54-70s: THE WATERFALL — twin curtains pouring down the sky ---
     at(54, () => this._curtain([0, 2, 4, 6, 8], 1.35, 62));
@@ -134,7 +138,7 @@ export class FinaleShow {
     // --- 71-90s: second build — multibreaks, then the postcard tableau:
     // the reference-photo sky, scarlet and teal dahlias flanking one huge
     // golden chrysanthemum, violet off the right shoulder ---
-    shell(71.5, 4, 'brocade', 1.4, { palette: GOLD });
+    shell(71.5, 4, 'timerain', 1.5, { palette: GOLD });
     shell(73.4, 1, 'multibreak', 1.2);
     shell(75.6, 7, 'multibreak', 1.2);
     shell(78, 1, 'dahlia', 1.15, { palette: PAL('scarlet pink') });
@@ -153,7 +157,7 @@ export class FinaleShow {
     let gap = 1.25;
     while (t < 104) {
       const p = (Math.random() * 9) | 0;
-      shell(t, p, randPick(['peony', 'dahlia', 'ring', 'chrys', 'palm', 'brocade']), randRange(1.0, 1.4));
+      shell(t, p, randPick(['peony', 'dahlia', 'ring', 'chrys', 'palm', 'brocade', 'ghost', 'saturn']), randRange(1.0, 1.4));
       if (Math.random() < 0.3) shell(t + 0.18, (p + 4) % 9, 'salute', 0.8, { sound: 'big' });
       t += gap;
       gap = Math.max(0.55, gap * 0.93);
@@ -163,13 +167,13 @@ export class FinaleShow {
     t = 105;
     while (t < 117.5) {
       shell(t, (Math.random() * 9) | 0,
-        randPick(['peony', 'dahlia', 'palm', 'brocade', 'chrys', 'multibreak', 'crackle']),
+        randPick(['peony', 'dahlia', 'palm', 'brocade', 'chrys', 'multibreak', 'crackle', 'kamuro', 'ghost']),
         randRange(1.2, 1.7));
       t += randRange(0.3, 0.55);
     }
     shell(118, 3, 'multibreak', 1.7, { flightT: 3.2, speed: 60 });
     shell(118.4, 5, 'multibreak', 1.7, { flightT: 3.2, speed: 60 });
-    shell(119, 4, 'brocade', 2.0, { palette: GOLD, flightT: 3.5, speed: 64 });
+    shell(119, 4, 'kamuro', 2.0, { palette: GOLD, flightT: 3.5, speed: 64 });
     // closing salute chain — the triple thunderclap that says "that's all"
     shell(121.6, 2, 'salute', 1.0, { sound: 'big', flightT: 2.2 });
     shell(122.0, 6, 'salute', 1.0, { sound: 'big', flightT: 2.2 });

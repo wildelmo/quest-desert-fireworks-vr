@@ -225,12 +225,14 @@ renderer.setAnimationLoop(() => {
 
   // gl_PointSize is in framebuffer pixels — in XR that's the eye buffer,
   // not the mirror canvas
+  let fbWidth = renderer.domElement.width;
   let fbHeight = renderer.domElement.height;
   if (renderer.xr.isPresenting) {
     const layer = renderer.xr.getBaseLayer?.();
+    fbWidth = (layer?.framebufferWidth ?? layer?.textureWidth ?? fbWidth * 2) / 2; // per-eye
     fbHeight = layer?.framebufferHeight ?? layer?.textureHeight ?? fbHeight;
   }
-  pool.update(time, fbHeight);
+  pool.update(time, fbWidth, fbHeight);
   audio.updateListener(renderer.xr.isPresenting ? renderer.xr.getCamera() : camera);
 
   renderer.render(scene, camera);

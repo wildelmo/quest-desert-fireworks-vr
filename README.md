@@ -14,10 +14,10 @@ flame to the fuse. Step back.
 
 | Item | What it does |
 | --- | --- |
-| **Bottle Rocket** | small, quick, snappy pop |
-| **Sky Rocket** | the classic — peony, dahlia, ring, willow, crossette… |
-| **Mammoth Rocket** | huge multi-break shells, palm bursts, serious bass |
-| **Grand Shell Rocket** | high, slow-opening display shells that fill much more of the sky |
+| **Bottle Rocket** | small, quick, snappy pop — sometimes a little ghost shell that changes color mid-air |
+| **Sky Rocket** | the classic — peony, dahlia, ring, Saturn (core + orbiting ring), willow, crossette, ghost… |
+| **Mammoth Rocket** | huge multi-break shells, palm bursts, kamuro crowns, drooping horsetails, serious bass |
+| **Grand Shell Rocket** | high, slow-opening display shells — gold kamuro, time-rain (glitter that keeps popping after the stars die), falling leaves, ghost relays |
 | **Desert Bloom Fountain** | 10 seconds of color-shifting sparks and hiss |
 | **Roman Candle** | 8 comets — you can hold this one while it fires and aim it |
 | **Finale Cake** | 16-shot barrage with brocade crowns, serpent stars, and a triple-break finale |
@@ -31,11 +31,14 @@ quietly restocks itself.
 Off to the right of camp sits a wooden **TNT plunger box** — hazard chevrons, blinking
 armed lamp, red wire snaking away over the dunes. Grab the T-handle and shove it all the
 way down (desktop: just click it). A spark races along the wire to a buried mortar
-battery and a choreographed **two-minute grand finale** fills the sky: opening gold
-brocade, color chases, a hushed willow interlude, **niagara waterfall curtains** — lines
-of horsetail shells breaking in unison so their striated silver trails pour down the sky
-in sheets, frying-metal sizzle and all — then an escalating barrage and a salute chain
-to close. The handle springs back up when the desert goes quiet, ready to go again.
+battery and a choreographed **two-minute grand finale** fills the sky: an opening gold
+**kamuro crown**, color chases (the return lap is all **ghost shells** that change color
+in mid-air), a hushed interlude of willows, horsetails and eerie falling leaves,
+**niagara waterfall curtains** — lines of horsetail shells breaking in unison so their
+striated silver trails pour down the sky in sheets, frying-metal sizzle and all — a
+gold **time-rain** whose glitter keeps popping long after the stars die, then an
+escalating barrage and a salute chain to close. The handle springs back up when the
+desert goes quiet, ready to go again.
 
 ## The lounge
 
@@ -122,9 +125,18 @@ To audition any recipe without a headset: `node tools/render-sounds.mjs out whoo
 ## Tech notes
 
 - Plain ES modules + [three.js](https://threejs.org) (vendored in `lib/`, pinned via npm) — no build step; the repo *is* the site.
-- Explosions run on a stateless GPU particle pool (~36k particles): the CPU writes spawn
+- Explosions run on a stateless GPU particle pool (~96k particles): the CPU writes spawn
   data once and the vertex shader integrates drag + gravity ballistics analytically every
   frame (`src/particles.js`) — Quest-friendly.
+- The pool renders everything in **one draw call** through a sprite atlas of real
+  particle textures (Kenney Particle Pack, CC0 — smoke puffs, 4/6-point star sparkles,
+  a crackle branch, an anamorphic flare): stars are **velocity-stretched** along their
+  screen-space motion like a long-exposure photograph; premultiplied-alpha blending
+  keeps stars additive while gunpowder smoke actually *occludes* the sky behind it;
+  smoke is lit by the moon, the basin-wide burst wash, and the strongest live flash —
+  so every shell illuminates its own smoke from inside, and old smoke blooms when the
+  next shell breaks beside it. Relay ("ghost") stars carry a second composition color
+  and switch mid-fall with an ignition pop, like the real two-stage stars.
 - Terrain is an analytic dune heightfield (`src/terrain.js`), so planting, walking, item
   drops and rocket ground-hits all sample the exact same function.
 - Lighting is full PBR: a tiny procedural equirect night sky on `scene.environment`
@@ -154,5 +166,6 @@ node tools/screenshot.mjs shots   # headless smoke test + screenshots
 
 MIT licensed. Nearly all art and audio are procedural; the exceptions are credited in
 [`assets/models/ATTRIBUTION.md`](assets/models/ATTRIBUTION.md) (lounge furniture, CC BY 4.0),
-[`assets/textures/README.md`](assets/textures/README.md) (sky and moon imagery) and
+[`assets/textures/README.md`](assets/textures/README.md) (sky and moon imagery, and the
+CC0 Kenney particle sprites the fireworks are drawn with) and
 [`assets/sounds/LICENSE.txt`](assets/sounds/LICENSE.txt) (two CC0 explosion recordings).
