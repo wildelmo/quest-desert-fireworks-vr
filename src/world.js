@@ -6,7 +6,6 @@ import * as THREE from 'three';
 import { createTerrain, terrainHeight, terrainNormal } from './terrain.js';
 import { createSky, createNightEnvMap, MOON_DIR } from './sky.js';
 import { FinaleShow } from './show.js';
-import { createLounge } from './props.js';
 import { createColossus, COLOSSUS_POS } from './colossus.js';
 import { TeleportRing, TeleportStation } from './teleport.js';
 import { mulberry32, randRange, clamp } from './utils.js';
@@ -803,9 +802,6 @@ export function createWorld(scene, fireworks, pool, audio) {
   detonator.onFire = () => show.start(detonator.wireCurve);
   show.onEnd = () => detonator.rearm();
 
-  // the spectator lounge behind spawn — scanned furniture, streams in async
-  const lounge = createLounge(scene, terrainHeight, contactShadow);
-
   // THE COLOSSUS — the monumental fire-wheel out west, running its own
   // program all night (see colossus.js for how it earns its size)
   const colossus = createColossus(scene, fireworks, pool, audio);
@@ -884,7 +880,6 @@ export function createWorld(scene, fireworks, pool, audio) {
       if (!colossusDet.armed && !colossusDet.grabbed && colossusDet.anim !== 'down'
         && (cph === 'dark' || cph === 'sputter')) colossusDet.rearm();
       show.update(dt, time);
-      lounge.update(time);
       lanternLight.intensity = 5.4 + Math.sin(time * 11) * 0.5 + Math.sin(time * 5.1) * 0.3;
       // bursts overhead wash the whole basin: the hemisphere light briefly
       // brightens and tints toward the shell color, so distant dunes and the
