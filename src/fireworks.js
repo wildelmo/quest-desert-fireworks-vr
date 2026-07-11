@@ -2549,12 +2549,16 @@ export class FireworksSystem {
           pool.spawn(cnt, (idx) => {
             const sp = randRange(5, 14) - tipSpeed * 0.85;
             const white = Math.random() < 0.35;
+            // explicit GLOW + zero stretch: these sparks are fast AND viewed
+            // at arm's length, so the pool's default motion-smear would draw
+            // them as thick tubes; keep them tiny twinkling points instead
             pool.set(idx,
               p.x + randRange(-0.012, 0.012), p.y + randRange(-0.012, 0.012), p.z + randRange(-0.012, 0.012),
               ex * sp + randRange(-0.7, 0.7), ey * sp + randRange(-0.7, 0.7), ez * sp + randRange(-0.7, 0.7),
               white ? 3.8 : c.r * 3.1, white ? 3.6 : c.g * 3.1, white ? 3.3 : c.b * 3.1,
               time, randRange(0.4, 1.0),
-              randRange(0.03, 0.06), 0.9, 1.5, Math.random() < 0.25 ? 45 : 0);
+              randRange(0.03, 0.06), 0.9, 1.5, Math.random() < 0.25 ? 45 : 0,
+              CELL.GLOW, 0);
           });
         }
 
