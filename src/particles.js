@@ -206,7 +206,9 @@ const VERT = /* glsl */`
       vec4 clipT = projectionMatrix * (modelViewMatrix * vec4(pos - velNow * shutter, 1.0));
       vec2 dpx = (clip.xy / clip.w - clipT.xy / clipT.w) * 0.5 * uRes;
       float lenPx = length(dpx);
-      lenPx = min(lenPx, min(basePx * 7.0, 260.0)); // fill-rate guard
+      // fill-rate guard: thin stars may stretch far (long thin lines are
+      // cheap), but never past an absolute screen-space cap
+      lenPx = min(lenPx, min(basePx * 18.0, 260.0));
       if (lenPx > 1.0) {
         float totalPx = basePx + lenPx;
         dir = dpx / max(length(dpx), 1e-4);
@@ -221,7 +223,8 @@ const VERT = /* glsl */`
       dir = vec2(cos(ang), sin(ang));
     }
     // streaks spread the same light over more pixels — dim them accordingly
-    vDim = mix(1.0, 1.0 - half_, 0.6);
+    // (gently: the streaks ARE the look, they must stay brilliant)
+    vDim = mix(1.0, 1.0 - half_, 0.45);
     vSprite = vec4(dir, half_, cell);
     gl_PointSize = min(basePx, 440.0);
   }
@@ -242,11 +245,16 @@ const FRAG = /* glsl */`
     // rotate into the sprite/streak frame
     vec2 q = vec2(vSprite.x * p.x + vSprite.y * p.y, -vSprite.y * p.x + vSprite.x * p.y);
     float h = vSprite.z;
+    float taper = 1.0;
     if (h > 0.0) {
-      // capsule sweep: sample the radial texture along the streak segment
+      // capsule sweep: sample the radial texture along the streak segment.
+      // Taper the tail like a long-exposure spark: the head (direction of
+      // motion, +x) burns hot, the trail dies away behind it.
+      float along = clamp((q.x / h) * 0.5 + 0.5, 0.0, 1.0);
       float r = max(1.0 - h, 1e-3);
       q = vec2(q.x - clamp(q.x, -h, h), q.y) / r;
       if (dot(q, q) > 1.0) discard;
+      taper = mix(0.22, 1.15, along * along);
     }
     // atlas cell lookup (4x2). flipY=false: canvas y-down == texture v-down,
     // and our q.y is NDC-up, so flip v.
@@ -263,7 +271,7 @@ const FRAG = /* glsl */`
       gl_FragColor = vec4(vColor * a, a);
     } else {
       // glowing star: pure additive (premultiplied with zero alpha)
-      gl_FragColor = vec4(vColor * (shape * vAlpha * vDim), 0.0);
+      gl_FragColor = vec4(vColor * (shape * vAlpha * vDim * taper), 0.0);
     }
   }
 `;
