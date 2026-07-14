@@ -1573,6 +1573,24 @@ export class FireworksSystem {
       pulse.color.lerp(colB, add / (pulse.energy + add));
       pulse.energy = Math.min(pulse.energy + add, 2.6);
 
+      // the luminous heart: a knot of big soft glows drifting out from the
+      // break point, alive for a second or so after the flash sprite dies —
+      // the blown-out core a photo shows where hundreds of trails overlap
+      // into one mass of light, and a cheap stand-in for lens bloom
+      pool.spawn(Math.round(8 + 8 * size), (i) => {
+        const u = Math.random() * 2 - 1;
+        const a = Math.random() * Math.PI * 2;
+        const rr = Math.sqrt(1 - u * u);
+        const sp = randRange(0.9, 2.2) * (1 + size);
+        pool.set(i,
+          pos.x, pos.y, pos.z,
+          rr * Math.cos(a) * sp + dvx * 0.6, u * sp + dvy * 0.6, rr * Math.sin(a) * sp + dvz * 0.6,
+          (colA.r + (1 - colA.r) * 0.35) * 0.6, (colA.g + (1 - colA.g) * 0.35) * 0.6, (colA.b + (1 - colA.b) * 0.35) * 0.6,
+          time, randRange(0.7, 1.3),
+          randRange(0.9, 1.5) * (0.5 + size), 0.1, 1.5, 0,
+          CELL.GLOW, 0);
+      });
+
       // lingering smoke haze: a real occluding cloud (albedo, lit by the
       // moon and by later bursts — see the particle shader) that swells and
       // drifts downwind after the stars die. What keeps a big shell from
@@ -1679,75 +1697,106 @@ export class FireworksSystem {
      * rays and shed glowing flakes along the way. Each flake is precomputed
      * at break time — born at the moment its star passes (birth offset),
      * placed by the same closed-form ballistics the shader integrates, given
-     * a fraction of the shed velocity and heavy drag so it slides a couple
-     * of meters and then hangs where it was dropped. A flake shed at ts
-     * lives until the head dies, so every ray stays lit from core to tip and
-     * then fades as one — and because outer flakes are younger, each ray is
-     * naturally rim-bright / center-dim, exactly how the real thing reads.
+     * a share of the shed velocity and heavy drag so it slides along the ray
+     * and then hangs where it was dropped. A flake shed at ts lives until
+     * the head dies, so every ray stays lit from core to tip and then fades
+     * as one — and because outer flakes are younger, each ray is naturally
+     * rim-bright / center-dim, exactly how the real thing reads. Flake
+     * spacing and smear are matched so neighbours overlap: the ray draws as
+     * ONE continuous thread of fire, not a dotted string.
+     *
+     * Ray directions come from a Fibonacci sphere (jittered, with a random
+     * azimuth per shell), not random sampling — real stars are packed
+     * evenly in the shell casing, and the even comb of same-length rays is
+     * most of what makes a display photo read "perfect dandelion".
+     *
      * opts.tipSparkle finishes each ray with strobing near-white glitter.
-     * Costs (1 + flakes + 2·tipSparkle) particles per ray.
+     * opts.tipColor/tipMix: bi-color rays — the ray blends from the shell
+     * color at the core to tipColor at the rim (tipMix = how far it gets).
+     * Every head star tows a fat dim glow halo, faking the lens bloom that
+     * makes photo rays luminous instead of hard-drawn.
+     * Costs (2 + flakes + 2·tipSparkle) particles per ray.
      */
+    const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
     const spawnRays = (rays, speed, opts = {}) => {
       const gravity = opts.gravity ?? 0.36;
       const drag = opts.drag ?? 0.5;
       const flakes = opts.flakes ?? 22;
       const tips = opts.tipSparkle ? 2 : 0;
-      const seg1 = 1 + flakes + tips;
+      const seg1 = 2 + flakes + tips;
       const bright = opts.brightness ?? glow;
       const flakeTw = opts.flakeTwinkle ?? 0;
       const baseLife = opts.life ?? 2.6;
       const scale = 0.6 + size * 0.7;
       const d = Math.max(drag, 0.0001);
       const gAcc = 9.81 * gravity;
+      const phase = Math.random() * Math.PI * 2; // spin the comb per shell
+      const tip = opts.tipColor !== undefined ? new THREE.Color(opts.tipColor) : null;
+      const tipMix = opts.tipMix ?? 0.22;
       // strobing flakes (>= 20 Hz) render as textured star crosses, which
       // can't stretch; smooth flakes get a long shutter that smears each one
       // along its ray — thin continuous lines instead of fat bead strings
       const fCell = flakeTw >= 20 ? undefined : CELL.GLOW;
-      const fStretch = flakeTw >= 20 ? undefined : 0.05;
+      const fStretch = flakeTw >= 20 ? undefined : 0.09;
       // per-ray state carried across the ray's flakes (fill runs in order)
-      let j = -1, vx, vy, vz, cr, cg, cb, tr, tg, tb, life;
+      let j = -1, vx, vy, vz, cr, cg, cb, tr, tg, tb, life, hsz;
       pool.spawn(rays * seg1, (i) => {
         j++;
         const seg = j % seg1;
         if (seg === 0) {
-          // the head star: uniform direction, near-uniform speed — the
-          // photo's bursts are clean spheres of same-length rays
-          const u = Math.random() * 2 - 1;
-          const a = Math.random() * Math.PI * 2;
+          // the head star: Fibonacci-sphere direction (evenly combed rays),
+          // near-uniform speed — same-length rays, like the photo
+          const si = (j / seg1) | 0;
+          const u = clamp(1 - (2 * (si + 0.5)) / rays + randRange(-0.025, 0.025), -1, 1);
+          const a = si * GOLDEN_ANGLE + phase + randRange(-0.04, 0.04);
           const r = Math.sqrt(1 - u * u);
-          const sp = speed * randRange(0.93, 1.0);
+          const sp = speed * randRange(0.96, 1.0);
           vx = r * Math.cos(a) * sp + dvx;
           vy = u * sp + dvy;
           vz = r * Math.sin(a) * sp + dvz;
           cr = colA.r; cg = colA.g; cb = colA.b;
-          // tip tone: the ray color pushed most of the way to white —
-          // pink-white on scarlet, pale gold on amber, mint on teal
-          tr = cr + (1 - cr) * 0.72; tg = cg + (1 - cg) * 0.72; tb = cb + (1 - cb) * 0.72;
+          // tip tone: the palette accent for bi-color shells, otherwise the
+          // ray color pushed most of the way to white — pink-white on
+          // scarlet, pale gold on amber, mint on teal
+          if (tip) { tr = tip.r; tg = tip.g; tb = tip.b; }
+          else { tr = cr + (1 - cr) * 0.72; tg = cg + (1 - cg) * 0.72; tb = cb + (1 - cb) * 0.72; }
           life = baseLife * randRange(0.9, 1.1);
+          hsz = (opts.psize ?? 0.12) * randRange(0.85, 1.2) * scale;
+          // the head rides the rim, so on bi-color shells it burns mostly tip
+          const hw = tip ? Math.min(1, tipMix) * 0.8 : 0;
           pool.set(i, pos.x, pos.y, pos.z, vx, vy, vz,
-            cr * 5.7 * bright, cg * 5.7 * bright, cb * 5.7 * bright,
-            time, life, (opts.psize ?? 0.12) * randRange(0.85, 1.2) * scale,
+            (cr + (tr - cr) * hw) * 5.7 * bright, (cg + (tg - cg) * hw) * 5.7 * bright, (cb + (tb - cb) * hw) * 5.7 * bright,
+            time, life, hsz,
             gravity, drag, 0, CELL.GLOW, 0.055);
-        } else if (seg <= flakes) {
+        } else if (seg === 1) {
+          // bloom halo: a fat, dim glow towing the head on the exact same
+          // arc — the soft light-bleed a camera lens paints around every
+          // bright star. Costs one big-but-faint quad per ray.
+          pool.set(i, pos.x, pos.y, pos.z, vx, vy, vz,
+            (cr + (tr - cr) * 0.4) * 0.85 * bright, (cg + (tg - cg) * 0.4) * 0.85 * bright, (cb + (tb - cb) * 0.4) * 0.85 * bright,
+            time, life * 0.96, hsz * 3.4,
+            gravity, drag, 0, CELL.GLOW, 0.04);
+        } else if (seg <= flakes + 1) {
           // a flake shed on the way out (jittered even spacing, skipping the
           // dark core the photo shows around the break point). Flakes keep a
           // healthy share of the shed velocity with moderate drag, so each
-          // one smears a few meters along the ray — that's what fuses the
-          // beads into the photo's solid lines instead of dotted strings.
-          const f = (seg - 1 + Math.random() * 0.9) / flakes;
+          // one smears along the ray far enough to overlap its neighbours —
+          // that's what fuses the beads into the photo's solid threads.
+          const f = (seg - 2 + Math.random() * 0.9) / flakes;
           const ts = life * (0.04 + 0.74 * f);
           const k = (1 - Math.exp(-d * ts)) / d;
           const e = Math.exp(-d * ts);
           const svy = (vy + gAcc / d) * e - gAcc / d; // shed-point velocity
-          // outer flakes tint gently toward the tip tone; the photo's rays
-          // hold saturation nearly to the end. flakeBright is the hue knob:
+          // outer flakes tint toward the tip tone (all the way on bi-color
+          // shells, gently otherwise; the photo's single-color rays hold
+          // saturation nearly to the end). flakeBright is the hue knob:
           // saturated primaries survive heavy HDR overdrive, but golds have
           // to stay under ~3x or ACES compresses them to silver-white.
-          const w = f * 0.22 * (opts.flakeTint ?? 1);
+          const w = Math.min(1, f * tipMix * (opts.flakeTint ?? 1) * (tip ? 1.25 : 1));
           const fb = (opts.flakeBright ?? 4.4) * (1 - f * 0.2) * bright;
           pool.set(i,
             pos.x + vx * k, pos.y + vy * k - gAcc * (ts - k) / d, pos.z + vz * k,
-            vx * e * 0.5 + randRange(-0.5, 0.5), svy * 0.5 + randRange(-0.5, 0.5), vz * e * 0.5 + randRange(-0.5, 0.5),
+            vx * e * 0.65 + randRange(-0.4, 0.4), svy * 0.65 + randRange(-0.4, 0.4), vz * e * 0.65 + randRange(-0.4, 0.4),
             (cr + (tr - cr) * w) * fb, (cg + (tg - cg) * w) * fb, (cb + (tb - cb) * w) * fb,
             time + ts, (life - ts) * randRange(0.9, 1.12) + 0.3,
             0.21 * randRange(0.8, 1.3) * scale, 0.08, 1.3, flakeTw,
@@ -1833,16 +1882,17 @@ export class FireworksSystem {
         break;
 
       case 'dahlia': {
-        // The postcard shell: saturated single-color rays held lit from core
-        // to tip, near-white sparkle at every ray end, breaking over a loose
-        // pistil core in the palette's accent color (teal over ember, scarlet
-        // over pink, violet over magenta…).
-        const rays = spec.count ?? Math.min(300, Math.round(100 + 115 * size + 50 * grand));
+        // The postcard shell: bi-color rays that burn the shell color at the
+        // core and blend to the palette accent at the rim (blue-to-gold,
+        // scarlet-to-pink, teal-to-ember…), near-white sparkle at every ray
+        // end, breaking over a loose pistil core in the accent color.
+        const rays = spec.count ?? Math.min(240, Math.round(90 + 100 * size + 45 * grand));
         const speed = spec.speed ?? wideGrandSpeed(11.5 + 12.5 * size);
         spawnRays(rays, speed, {
           life: (2.5 + size) * grandLife, drag: slowGrandDrag(0.52), gravity: 0.34,
-          flakes: Math.round(20 + 11 * Math.min(size, 1.6)), tipSparkle: true,
+          flakes: Math.round(28 + 15 * Math.min(size, 1.6)), tipSparkle: true,
           psize: 0.12 * grandPSize,
+          tipColor: palette.b, tipMix: 1.0,
         });
         // the pistil rides dimmer than the rays on purpose: overdriving warm
         // accent colors would ACES-compress them to white, and the photo's
@@ -1855,9 +1905,9 @@ export class FireworksSystem {
       }
 
       case 'chrys': // brocade-crown chrysanthemum: dense hanging glitter rays
-        spawnRays(Math.min(340, Math.round(110 + 120 * size + 48 * grand)), wideGrandSpeed(11 + 13 * size), {
+        spawnRays(Math.min(260, Math.round(95 + 105 * size + 40 * grand)), wideGrandSpeed(11 + 13 * size), {
           life: (2.9 + 1.1 * size) * grandLife, drag: slowGrandDrag(0.48), gravity: 0.45,
-          flakes: Math.round(22 + 11 * Math.min(size, 1.6)), tipSparkle: true,
+          flakes: Math.round(30 + 15 * Math.min(size, 1.6)), tipSparkle: true,
           flakeTwinkle: 15, psize: 0.10 * grandPSize,
           flakeBright: 2.6, flakeTint: 0.4, // hold the amber — see spawnRays
         });
@@ -2096,9 +2146,9 @@ export class FireworksSystem {
         // the crown jewel of Japanese shells: a dense gold crown that opens
         // slow, hangs, then pours toward the ground in strobing glitter —
         // the long-life rays droop under gravity and blink as they fall
-        spawnRays(Math.min(360, Math.round(120 + 130 * size + 52 * grand)), wideGrandSpeed(9.5 + 10.5 * size), {
+        spawnRays(Math.min(280, Math.round(105 + 115 * size + 45 * grand)), wideGrandSpeed(9.5 + 10.5 * size), {
           life: (4.4 + 1.7 * size) * grandLife, drag: slowGrandDrag(0.34), gravity: 0.52,
-          flakes: Math.round(24 + 12 * Math.min(size, 1.6)), tipSparkle: true,
+          flakes: Math.round(32 + 16 * Math.min(size, 1.6)), tipSparkle: true,
           flakeTwinkle: 21, flakeBright: 2.5, flakeTint: 0.35, psize: 0.10 * grandPSize,
         });
         // silver-white glitter dust threaded through the crown
