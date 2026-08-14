@@ -335,8 +335,9 @@ export class FinaleShow {
       // high band: one brocade crown every third beat, walking the arc —
       // the sparse anchors the budget allows (brocade 0.6 ≈ 4.6k living
       // ~5 s → ~3 alive ≈ 15k standing overhead; a chrys here would cost
-      // 8k each and double that)
-      if (beat % 3 === 0) {
+      // 8k each and double that). No anchors in the last two seconds, so
+      // the terminal kamuro's break second isn't shared with a wall crown.
+      if (beat % 3 === 0 && t < end - 2.2) {
         this._cue(t + 0.1, [2, 6, 4, 0, 8][((beat / 3) | 0) % 5], 'brocade', 0.6, {
           palette: GOLD, sound: 'big', anchor: true, lift: true,
           speed: randRange(58, 64), flightT: randRange(3.2, 3.5),
@@ -481,10 +482,15 @@ export class FinaleShow {
       const hitTimes = [T(22.8), T(37.4)]; // the all-pad hits ARE those bars
       let bar = T(15.6), k = 0;
       while (bar < T(43.5)) {
-        if (hitTimes.some((h) => Math.abs(bar - h) < 1.15)) { bar += randRange(1.85, 2.35); k++; continue; }
+        // a bar that would collide with an all-pad hit steps past it — the
+        // hit takes that beat, the pulse never stops
+        const hit = hitTimes.find((h) => Math.abs(bar - h) < 1.15);
+        if (hit) bar = hit + randRange(1.2, 1.5);
         const pal = bar < T(30) ? CRIMSON : SCARLET;
-        const group = k % 2 ? ODDS : EVENS;
-        this._volley(bar, group, 'peony', randRange(0.46, 0.56), {
+        // odd bars borrow a pontoon pad: same volley, one break nearer the
+        // camp — cheap depth the real barges get for free
+        const group = k % 2 ? [...ODDS, 9 + (k % 5)] : EVENS;
+        this._volley(bar, group, 'peony', randRange(0.44, 0.54), {
           palette: pal, layer: 'mid', sound: 'med',
           pistil: { color: pal.b, ratio: 0.38 },
         }, 0.055);
@@ -495,24 +501,24 @@ export class FinaleShow {
         }
         if (k % 5 === 3) this._mineFront(bar + 0.5, [9 + (k % 5)], { palette: pal, size: 0.8, lifts: 1 });
         k++;
-        bar += randRange(1.85, 2.35); // on the beat, never on a grid
+        bar += randRange(1.7, 2.1); // on the beat, never on a grid
       }
       // sparse anchors: big ray shells with tremalon rise, one at a time
       this._cue(T(19.6), 2, 'chrys', 1.2, {
         palette: CRIMSON, sound: 'big', anchor: true, engine: true, tail: 'glitter', speed: 60, flightT: 3.3,
       });
-      this._cue(T(27.2), 6, 'dahlia', 1.25, {
+      this._cue(T(27.2), 6, 'dahlia', 1.15, {
         palette: CRIMSON, sound: 'big', anchor: true, engine: true, tail: 'glitter', speed: 61, flightT: 3.4,
       });
-      this._cue(T(35.1), 3, 'chrys', 1.2, {
+      this._cue(T(35.1), 3, 'chrys', 1.15, {
         palette: SCARLET, sound: 'big', anchor: true, engine: true, tail: 'glitter', speed: 60, flightT: 3.3,
       });
       this._cue(T(42.6), 5, 'dahlia', 1.25, {
         palette: SCARLET, sound: 'big', anchor: true, engine: true, tail: 'glitter', speed: 62, flightT: 3.4,
       });
       // two all-pad hits keep the scene honest
-      this._salvo(T(22.8), ALL9, 'ring', 0.5, { palette: CRIMSON, layer: 'mid', sound: 'med' });
-      this._salvo(T(37.4), ALL9, 'peony', 0.5, { palette: SCARLET, layer: 'mid', sound: 'med' });
+      this._salvo(T(22.8), ALL9, 'ring', 0.45, { palette: CRIMSON, layer: 'mid', sound: 'med' });
+      this._salvo(T(37.4), ALL9, 'peony', 0.48, { palette: SCARLET, layer: 'mid', sound: 'med' });
       // one rolling fireball low over the dunes to close the tide
       this._cue(T(40.9), 11, 'lampare', 1.0, {
         palette: CRIMSON, sound: 'big', anchor: true, lift: true, speed: 24, flightT: 1.3,
@@ -588,12 +594,13 @@ export class FinaleShow {
       // so the pair never stacks the ring while the kamuro still hangs.)
       this._curtainCue(T(81.5), [0, 2, 4, 6, 8], 1.25, 58);
       this._curtainCue(T(85.2), [1, 3, 5, 7], 0.8, 46);
-      this._cue(T(86.0), 4, 'strobewillow', 0.8, { palette: SILVER, sound: null, speed: 42, flightT: 2.3 });
-      // lone horsetails keep the sheet fed as it thins
-      this._cue(T(87.5), 2, 'waterfall', 0.7, {
+      this._cue(T(86.0), 4, 'strobewillow', 0.7, { palette: SILVER, sound: null, speed: 42, flightT: 2.3 });
+      // lone horsetails keep the sheet fed as it thins — small on purpose:
+      // their 6 s stars share ring time with scene 5's first chases
+      this._cue(T(87.5), 2, 'waterfall', 0.55, {
         palette: WATERFALL_PALETTE, sound: 'small', anchor: true, speed: 36, flightT: 2.3, spread: 0.04, lift: true,
       });
-      this._cue(T(88.4), 6, 'waterfall', 0.7, {
+      this._cue(T(88.4), 6, 'waterfall', 0.55, {
         palette: WATERFALL_PALETTE, sound: 'small', anchor: true, speed: 36, flightT: 2.3, spread: 0.04, lift: true,
       });
     }
@@ -606,10 +613,11 @@ export class FinaleShow {
     // Palette narrows to gold and white.
     {
       const BROC = PAL('golden brocade');
-      // pass 1 waits for curtain 1's stars to die (~91) — peony, not
-      // brocade, so nothing here outlives its welcome in the ring
-      this._chase(T(91.2), 0.12, L2R, 'peony', 0.45, { palette: BROC, sound: 'small' });
-      this._chase(T(93.9), 0.10, R2L, 'peony', 0.48, { palette: GOLD, sound: 'small' });
+      // pass 1 waits for curtain 1's 7-second stars to die (~92) — peony,
+      // not brocade, and light: the ring cursor laps every ~96k spawns,
+      // so heavy fire here would wrap onto the curtain while it still hangs
+      this._chase(T(92.2), 0.12, L2R, 'peony', 0.42, { palette: BROC, sound: 'small' });
+      this._chase(T(94.4), 0.10, R2L, 'peony', 0.45, { palette: GOLD, sound: 'small' });
       this._cue(T(95.2), 3, 'bees', 1.0, { palette: GOLD, sound: null, speed: 42, flightT: 2.3, lift: true });
       this._cue(T(95.9), 5, 'fish', 1.0, { palette: BROC, sound: null, speed: 44, flightT: 2.4 });
       this._chase(T(96.7), 0.09, OUTSIDE_IN, 'peony', 0.48, { palette: GOLD, sound: 'small' });
@@ -630,7 +638,7 @@ export class FinaleShow {
       this._cue(T(106.6), 4, 'thousandbloom', 1.1, {
         palette: BROC, sound: 'med', anchor: true, lift: true, speed: 56, flightT: 3.0,
       });
-      this._chase(T(108.5), 0.07, OUTSIDE_IN, 'brocade', 0.45, { palette: BROC, sound: 'small' });
+      this._chase(T(108.5), 0.07, OUTSIDE_IN, 'peony', 0.48, { palette: BROC, sound: 'small' });
       // all-pad hit + the first pre-finale thunderclap
       this._salvo(T(110.7), ALL9, 'peony', 0.52, { palette: GOLD, layer: 'mid', sound: 'med' });
       this._cue(T(110.9), 4, 'salute', 0.7, { sound: 'big', lift: true, speed: 44, flightT: 2.1 });
@@ -640,12 +648,12 @@ export class FinaleShow {
       let t = T(113.5), gap = 1.5, w = 0;
       while (t < T(119.7)) {
         const base = (w * 4) % 9;
-        this._volley(t, [base, (base + 3) % 9, (base + 6) % 9], 'peony', 0.46, {
+        this._volley(t, [base, (base + 3) % 9, (base + 6) % 9], 'peony', 0.44, {
           palette: w % 2 ? GOLD : BROC, layer: w % 3 === 2 ? 'low' : 'mid', sound: 'small', lifts: 1,
         }, 0.04);
         if (w % 2 === 1) this._fan(t + 0.15, 9 + w % 5, 4, 42, w % 4 === 1 ? 13 : -13, { palette: GOLD });
         t += gap;
-        gap = Math.max(0.28, gap * 0.72);
+        gap = Math.max(0.34, gap * 0.72);
         w++;
       }
       this._cue(T(115.9), 3, 'salute', 0.7, { sound: 'big', lift: true, speed: 44, flightT: 2.1 });
@@ -664,7 +672,7 @@ export class FinaleShow {
       // the last three seconds are short-lived peony/spider so the sky can
       // actually go dark for the silence beat (and so the accelerando's
       // pileup doesn't ride the ring into the wall).
-      let t = T(120.0), gap = 0.58, w = 0;
+      let t = T(120.4), gap = 0.62, w = 0;
       while (t < T(126.8)) {
         const base = (w * 2) % 9;
         const late = t > T(124);
@@ -695,10 +703,10 @@ export class FinaleShow {
       this._cue(t3 + 0.05, 4, 'kamuro', 2.0, {
         palette: GOLD, sound: 'big', anchor: true, engine: true, tail: 'glitter', speed: 66, flightT: 3.3,
       });
-      this._cue(t3 + 1.30, 1, 'dahlia', 1.3, {
+      this._cue(t3 + 1.70, 1, 'dahlia', 1.25, {
         palette: BROC, sound: 'big', anchor: true, engine: true, speed: 63, flightT: 3.3,
       });
-      this._cue(t3 + 1.45, 7, 'dahlia', 1.3, {
+      this._cue(t3 + 1.85, 7, 'dahlia', 1.25, {
         palette: BROC, sound: 'big', anchor: true, engine: true, speed: 63, flightT: 3.3,
       });
       const ripple = [...L2R, ...R2L, ...OUTSIDE_IN];

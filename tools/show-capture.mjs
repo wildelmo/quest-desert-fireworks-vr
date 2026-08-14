@@ -22,11 +22,13 @@ await page.goto('http://localhost:8080/?autostart=desktop', { waitUntil: 'load' 
 await page.waitForTimeout(2500);
 page.setDefaultTimeout(600000);
 
-// aim at the battery (pads ~z=-72, bursts 40-75m up) and start the show
+// aim at the battery (pads z≈-48..-82; the show now stacks three altitude
+// bands, mines at the sand up to ~150 m crowns, so frame the full column)
+// and start the show
 await page.evaluate(() => {
   const app = window.__app;
-  app.camera.parent.position.set(0, 0, -6);
-  app.camera.lookAt(6, 42, -74);
+  app.camera.parent.position.set(0, 0, 2);
+  app.camera.lookAt(6, 60, -74);
   app.world.detonator.autoPlunge();
 });
 
