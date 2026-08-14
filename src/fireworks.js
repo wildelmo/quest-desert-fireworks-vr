@@ -1397,7 +1397,9 @@ export class FireworksSystem {
             // rocket bursts use — callers only override for odd shells
             sound: opts.sound !== undefined ? opts.sound
               : (size > 0.75 ? 'big' : size > 0.45 ? 'med' : 'small'),
-            drift: v?.multiplyScalar(0.5),
+            // clone: the hook below is promised the TRUE burst velocity on
+            // both paths, so the default action must not mutate v
+            drift: v?.clone().multiplyScalar(0.5),
           });
         }
         opts.onBurst?.(p, v);
@@ -1487,7 +1489,6 @@ export class FireworksSystem {
       pool.spawn(n * 6, (i) => {
         mj++;
         const seg = mj % 6; // 3 legs x (head + bead)
-        const leg = seg >> 1;
         if (seg === 0) {
           // fresh star: sample the cone (uniform over the disc)
           const t = coneRad * Math.sqrt(Math.random());
@@ -2171,9 +2172,10 @@ export class FireworksSystem {
           life: 1.6 * grandLife, psize: 0.075 * grandPSize, drag: slowGrandDrag(0.7), stretch: 0.04,
         });
         // ~40% of peonies carry a pistil: a slow contrast-color heart inside
-        // the sphere, the way real ball shells are often built two-stage
-        // (the choreography can also demand one explicitly via spec.pistil)
-        if (Math.random() < 0.4) {
+        // the sphere, the way real ball shells are often built two-stage —
+        // unless the choreography demanded one via spec.pistil, which owns
+        // the core alone (two stacked cores overdrive the accent to white)
+        if (!spec.pistil && Math.random() < 0.4) {
           spawnSphere(Math.round((90 + 150 * size) * grandCount), (4 + 5 * size), {
             shellSkin: true, color: 'b', life: 1.9 * grandLife, drag: 0.8, gravity: 0.3,
             psize: 0.16 * grandPSize, brightness: glow * 0.8, whiteCore: 0.02,
@@ -3041,9 +3043,18 @@ export class FireworksSystem {
         // slots are working fountains. Silent.
         const nF = size < 1 ? 1 : 3;
         const gF = 1.0, dF = 3.2; // terminal ≈ 9.81/3.2 ≈ 3 m/s under canopy
-        const FLARE_COLS = [[1, 0.97, 0.9], [1, 0.24, 0.17], [0.38, 1, 0.44]];
+        // stock magnesium loadout: white, strontium red, barium green. A
+        // choreographed scene owns its palette instead: the lead flare
+        // burns near-white and the wingmen carry the scene's two tones, so
+        // a gold-silver interlude never gets a stray green lantern.
+        const FLARE_COLS = spec.palette
+          ? [[colA.r + (1 - colA.r) * 0.75, colA.g + (1 - colA.g) * 0.75, colA.b + (1 - colA.b) * 0.75],
+            [colA.r, colA.g, colA.b], [colB.r, colB.g, colB.b]]
+          : [[1, 0.97, 0.9], [1, 0.24, 0.17], [0.38, 1, 0.44]];
         for (let f = 0; f < nF; f++) {
-          const col = FLARE_COLS[(Math.random() * FLARE_COLS.length) | 0];
+          const col = spec.palette
+            ? FLARE_COLS[f % FLARE_COLS.length]
+            : FLARE_COLS[(Math.random() * FLARE_COLS.length) | 0];
           const L = randRange(12, 18);
           const p0 = pos.clone();
           p0.x += randRange(-4, 4); p0.y += randRange(-1.5, 1.5); p0.z += randRange(-4, 4);

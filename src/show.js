@@ -129,18 +129,14 @@ export class FinaleShow {
       gravity: 0.9, drag: 0.35, flightT,
       onBurst: (p, v) => {
         if (o.burst === false) {
-          // fan comet: dies in a spit of dim embers — no pattern, no report
-          const pool = fw.pool, tm = fw.time;
-          pool.spawn(8, (i) => pool.set(i,
-            p.x, p.y, p.z,
-            randRange(-1.5, 1.5), randRange(-0.5, 1.2), randRange(-1.5, 1.5),
-            1.1, 0.8, 0.4, tm, randRange(0.25, 0.55),
-            randRange(0.02, 0.045), 0.6, 1.6, 0));
+          // fan comet: dies the same quiet death as an engine-fired fan —
+          // one fizzle implementation, not a drifting copy
+          fw._fizzle(p, palette);
           return;
         }
         fw.burst(p, {
           pattern, size, palette, sound: o.sound ?? null,
-          pistil: o.pistil, drift: v?.multiplyScalar(0.5),
+          pistil: o.pistil, drift: v?.clone().multiplyScalar(0.5),
         });
       },
     });
@@ -316,8 +312,11 @@ export class FinaleShow {
     let beat = 0;
     while (t < end) {
       // mid band: rotating trio volleys, spiders every third beat (cheap
-      // and huge — they do the "no black gaps" work)
-      const base = (beat * 3) % 9;
+      // and huge — they do the "no black gaps" work). Stride 4 is coprime
+      // with 9, so consecutive beats walk the trio across every pad in the
+      // arc — a stride of 3 would nail the same three pads all twelve
+      // seconds and leave dark lanes through the wall.
+      const base = (beat * 4) % 9;
       const trio = [base, (base + 3) % 9, (base + 6) % 9];
       const spider = beat % 3 === 2;
       n += this._volley(t, trio, spider ? 'spider' : 'peony', spider ? 0.8 : 0.42, {

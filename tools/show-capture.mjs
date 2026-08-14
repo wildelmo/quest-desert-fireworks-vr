@@ -5,7 +5,7 @@ import { chromium } from 'playwright-core';
 import fs from 'node:fs';
 
 const outDir = process.argv[2] ?? 'show-shots';
-const times = (process.argv[3] ?? '4,9,15,20,26,31,36,42,48,56,61,68,74,80,86,93,100,107,112,117,121')
+const times = (process.argv[3] ?? '4,9,15,20,26,31,36,42,48,56,61,68,74,80,86,93,100,107,112,117,121,126,131,136,139,142,145,148,151,155')
   .split(',').map(Number).sort((a, b) => a - b);
 fs.mkdirSync(outDir, { recursive: true });
 
@@ -32,7 +32,6 @@ await page.evaluate(() => {
   app.world.detonator.autoPlunge();
 });
 
-let prevShowT = -3; // show starts ~0 after plunge; poll the show clock
 const stats = [];
 for (const t of times) {
   await page.waitForFunction(
@@ -52,7 +51,6 @@ for (const t of times) {
   });
   stats.push({ file, ...s });
   console.log('saved', file, JSON.stringify(s));
-  prevShowT = t;
 }
 console.log(errors.length ? 'ERRORS:\n' + errors.join('\n') : 'no page errors');
 await browser.close();
