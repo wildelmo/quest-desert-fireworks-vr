@@ -136,6 +136,65 @@ function ballisticVel(v0, t, gravity, drag, out) {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Pattern-shell point sets. Real pattern shells glue their stars to a
+// cardboard former inside the casing; ours are unit-scale XY outlines baked
+// once at module load. Layout: flat triples [x, y, accent] where accent = 1
+// marks points that burn the palette's second color (smiley eyes + grin).
+const HEART_PTS = (() => {
+  const pts = [];
+  for (let i = 0; i < 90; i++) {
+    // the classic cardioid-ish heart curve, normalized to ~unit radius
+    const t = (i / 90) * Math.PI * 2;
+    const x = 16 * Math.pow(Math.sin(t), 3);
+    const y = 13 * Math.cos(t) - 5 * Math.cos(2 * t) - 2 * Math.cos(3 * t) - Math.cos(4 * t);
+    pts.push(x / 16, (y + 2.4) / 16, 0);
+  }
+  return pts;
+})();
+const SMILEY_PTS = (() => {
+  const pts = [];
+  for (let i = 0; i < 60; i++) { // the face ring
+    const a = (i / 60) * Math.PI * 2;
+    pts.push(Math.cos(a), Math.sin(a), 0);
+  }
+  for (const sx of [-1, 1]) { // eyes: two tight knots of stars
+    for (let i = 0; i < 4; i++) {
+      const a = (i / 4) * Math.PI * 2 + 0.6;
+      pts.push(sx * 0.36 + Math.cos(a) * 0.09, 0.34 + Math.sin(a) * 0.09, 1);
+    }
+  }
+  for (let i = 0; i < 14; i++) { // the grin: a lower arc in the accent color
+    const a = Math.PI * (1.13 + 0.74 * (i / 13));
+    pts.push(Math.cos(a) * 0.58, Math.sin(a) * 0.58 + 0.08, 1);
+  }
+  return pts;
+})();
+const STAR5_PTS = (() => {
+  // five-point star outline: 10 edges walked with 8 stars each, point up
+  const pts = [];
+  const R = 1, r = 0.40;
+  for (let v = 0; v < 10; v++) {
+    const a0 = Math.PI / 2 + (v / 10) * Math.PI * 2;
+    const a1 = Math.PI / 2 + ((v + 1) / 10) * Math.PI * 2;
+    const r0 = v % 2 ? r : R, r1 = v % 2 ? R : r;
+    const x0 = Math.cos(a0) * r0, y0 = Math.sin(a0) * r0;
+    const x1 = Math.cos(a1) * r1, y1 = Math.sin(a1) * r1;
+    for (let i = 0; i < 8; i++) {
+      const f = i / 8;
+      pts.push(x0 + (x1 - x0) * f, y0 + (y1 - y0) * f, 0);
+    }
+  }
+  return pts;
+})();
+
+// The new-generation patterns carry their own texture — dark phases before
+// pops, silent swarms, planar shapes, bare flares. The generic white sparkle
+// halo the classic breaks get would pollute all of them, so they sit it out.
+const SELF_TEXTURED = new Set(['thousandbloom', 'bees', 'fish', 'dragoneggs',
+  'spider', 'farfalle', 'tourbillon', 'heart', 'smiley', 'star5', 'flare',
+  'strobewillow', 'lampare']);
+
 // How much of the impact speed survives a bounce off the sand — soft, so
 // things skip a little instead of ping-ponging around the desert.
 const BOUNCE_RESTITUTION = 0.42;
@@ -1307,7 +1366,13 @@ export class FireworksSystem {
    * A display shell fired from a bare mortar pad (no item — the finale show
    * launches these from out in the dunes). pos is the pad; the star streaks
    * up for flightT seconds and breaks into `pattern` at `size`.
-   * opts: {pattern, size, palette, sound, speed, flightT, spread, dir?}
+   * opts: {pattern, size, palette, sound, speed, flightT, spread, dir?,
+   *   tail?: 'glitter' — tremalon rise, the wake keeps flashing after the
+   *          comet passes (dense delayed micro-stars along the arc),
+   *   burst?: false — the comet is a fan/chase piece with no charge: it
+   *          dies in a faint fizzle instead of a pattern (and no report),
+   *   onBurst?: hook called at the burst moment with (pos, vel), after the
+   *          default action — lets the choreography chain follow-ups}
    */
   mortarShot(pos, opts) {
     const dir = opts.dir
@@ -1322,15 +1387,190 @@ export class FireworksSystem {
     const vel = dir.clone().multiplyScalar(opts.speed ?? 52);
     this._fireShot(pos.clone(), vel, new THREE.Color(palette.a), 1.5, {
       gravity: 0.9, drag: 0.35, flightT: opts.flightT ?? 2.8,
-      onBurst: (p, v) => this.burst(p, {
-        pattern: opts.pattern, size, palette,
-        // default report class scales with the shell, same mapping the
-        // rocket bursts use — callers only override for odd shells
-        sound: opts.sound !== undefined ? opts.sound
-          : (size > 0.75 ? 'big' : size > 0.45 ? 'med' : 'small'),
-        drift: v?.multiplyScalar(0.5),
-      }),
+      tail: opts.tail,
+      onBurst: (p, v) => {
+        if (opts.burst === false) this._fizzle(p, palette);
+        else {
+          this.burst(p, {
+            pattern: opts.pattern, size, palette,
+            // default report class scales with the shell, same mapping the
+            // rocket bursts use — callers only override for odd shells
+            sound: opts.sound !== undefined ? opts.sound
+              : (size > 0.75 ? 'big' : size > 0.45 ? 'med' : 'small'),
+            drift: v?.multiplyScalar(0.5),
+          });
+        }
+        opts.onBurst?.(p, v);
+      },
     });
+  }
+
+  /**
+   * A dud by design: fan/chase comets (mortarShot burst:false) carry no
+   * charge, so the head just crumbles into a pinch of dim gold sparks and a
+   * wisp of smoke — no pattern, no report. Real comet tubes end like this.
+   */
+  _fizzle(pos, palette) {
+    const pool = this.pool;
+    const time = this.time;
+    const c = _c1.set(palette.a);
+    pool.spawn(16, (i) => {
+      const u = Math.random() * 2 - 1;
+      const a = Math.random() * Math.PI * 2;
+      const rr = Math.sqrt(1 - u * u);
+      const sp = randRange(1.2, 3.4);
+      pool.set(i,
+        pos.x, pos.y, pos.z,
+        rr * Math.cos(a) * sp, u * sp - 0.6, rr * Math.sin(a) * sp,
+        c.r * 1.7 + 0.5, c.g * 1.5 + 0.4, c.b * 1.0 + 0.2,
+        time, randRange(0.3, 0.75),
+        randRange(0.03, 0.06), 0.6, 1.4, 28);
+    });
+    pool.spawn(3, (i) => {
+      pool.set(i,
+        pos.x, pos.y, pos.z,
+        randRange(-0.3, 0.3), randRange(0.2, 0.6), randRange(-0.3, 0.3),
+        0.38, 0.38, 0.42,
+        time, randRange(1.8, 3.2),
+        randRange(0.3, 0.55), -0.015, 1.4, -1);
+    });
+  }
+
+  /**
+   * A mine (pot à feu): no shell, no apex break — the whole charge erupts
+   * off the pad at once as a cone of stars that climb 20-60 m, decelerate
+   * and arc back down. The ground-level counterpart of a shell burst; what
+   * ties the sky show to the dunes (and, in VR, puts a wall of fire RIGHT
+   * THERE). opts: {size=1, palette, kind: 'color'|'crackle'|'serpents',
+   * dir? (tilted cone axis), coneDeg=16, sound=true}
+   */
+  mine(pos, opts = {}) {
+    const size = opts.size ?? 1;
+    const palette = opts.palette ?? randPick(PALETTES);
+    const kind = opts.kind ?? 'color';
+    const coneRad = (opts.coneDeg ?? 16) * Math.PI / 180;
+    const pool = this.pool;
+    const time = this.time;
+    const colA = _c1.set(palette.a);
+    const colB = _c2.set(palette.b);
+
+    // cone axis + an orthonormal basis around it (plain scalars so the
+    // spawn fill below owns no scratch vectors)
+    const axis = opts.dir ? _v1.copy(opts.dir).normalize() : _v1.set(0, 1, 0);
+    const ax = axis.x, ay = axis.y, az = axis.z;
+    const u = _v2.crossVectors(axis, Math.abs(axis.y) < 0.9 ? UP : X_AXIS).normalize();
+    const ux = u.x, uy = u.y, uz = u.z;
+    const w = _v3.crossVectors(axis, u).normalize();
+    const wx = w.x, wy = w.y, wz = w.z;
+
+    if (opts.sound !== false) {
+      // the same mortar thump, pitched a touch up — a mine is all muzzle
+      this.audio.play('lift', pos, {
+        gain: 1.15, refDistance: 4, send: 0.4, rate: randRange(1.0, 1.18), delayBySound: true,
+      });
+    }
+    this.flashes.flash(_v4.copy(pos).setY(pos.y + 0.6), palette.a, 38 + 46 * size, 0.3);
+    this._padDust(pos.clone(), size);
+
+    const spMul = 0.7 + size * 0.5;
+    const grav = 1.0, drg = 0.55;
+    const crackle = kind === 'crackle';
+
+    if (kind === 'serpents') {
+      // a mine of serpents: fewer stars, each rising in 3 chained legs that
+      // veer between them — precomputed closed-form like the bees swarm,
+      // one particle per leg, so the squirming column costs nothing at
+      // runtime
+      const n = Math.round(34 + 40 * Math.min(size, 1.05));
+      const legDur = 0.42;
+      let mj = -1, mx, my, mz, mvx, mvy, mvz, mBirth, cr, cg, cb;
+      pool.spawn(n * 6, (i) => {
+        mj++;
+        const seg = mj % 6; // 3 legs x (head + bead)
+        const leg = seg >> 1;
+        if (seg === 0) {
+          // fresh star: sample the cone (uniform over the disc)
+          const t = coneRad * Math.sqrt(Math.random());
+          const a = Math.random() * Math.PI * 2;
+          const st = Math.sin(t), ct = Math.cos(t);
+          const dx = ax * ct + (ux * Math.cos(a) + wx * Math.sin(a)) * st;
+          const dy = ay * ct + (uy * Math.cos(a) + wy * Math.sin(a)) * st;
+          const dz = az * ct + (uz * Math.cos(a) + wz * Math.sin(a)) * st;
+          const sp = randRange(28, 55) * spMul;
+          mx = pos.x; my = pos.y + 0.2; mz = pos.z;
+          mvx = dx * sp; mvy = dy * sp; mvz = dz * sp;
+          mBirth = Math.random() * 0.2; // the 0.2 s stagger = column body
+          const c = Math.random() < 0.5 ? colA : colB;
+          cr = c.r * 6.4; cg = c.g * 6.4; cb = c.b * 6.4;
+        } else if (seg % 2 === 0) {
+          // veer into the next leg: advance to the closed-form end of the
+          // previous one, then kick the heading sideways
+          const d = Math.max(drg, 1e-4);
+          const k = (1 - Math.exp(-d * legDur)) / d;
+          const e = Math.exp(-d * legDur);
+          const gA = 9.81 * grav;
+          mx += mvx * k; my += mvy * k - gA * (legDur - k) / d; mz += mvz * k;
+          mvx = mvx * e + randRange(-7, 7);
+          mvy = mvy * e - gA * (1 - e) / d + randRange(-2, 5);
+          mvz = mvz * e + randRange(-7, 7);
+          mBirth += legDur;
+        }
+        const head = seg % 2 === 0;
+        pool.set(i, mx, my, mz, mvx, mvy, mvz,
+          head ? cr : cr * 0.45, head ? cg : cg * 0.45, head ? cb : cb * 0.45,
+          time + mBirth + (head ? 0 : 0.035), legDur * (head ? randRange(1.1, 1.35) : 1.0),
+          randRange(0.07, 0.11) * (0.7 + size * 0.4), grav, drg, head ? 42 : 0,
+          CELL.GLOW, 0.07);
+      });
+    } else {
+      // color / crackle column: staggered heads + one tracer bead each,
+      // long shutters so the eruption reads as a sheaf of fire threads
+      const n = Math.round(60 + 76 * Math.min(size, 1.05));
+      let mj = -1, mvx, mvy, mvz, mBirth, mLife, cr, cg, cb, mSz;
+      pool.spawn(n * 2, (i) => {
+        mj++;
+        if (mj % 2 === 0) {
+          const t = coneRad * Math.sqrt(Math.random());
+          const a = Math.random() * Math.PI * 2;
+          const st = Math.sin(t), ct = Math.cos(t);
+          const dx = ax * ct + (ux * Math.cos(a) + wx * Math.sin(a)) * st;
+          const dy = ay * ct + (uy * Math.cos(a) + wy * Math.sin(a)) * st;
+          const dz = az * ct + (uz * Math.cos(a) + wz * Math.sin(a)) * st;
+          const sp = randRange(28, 55) * spMul;
+          mvx = dx * sp; mvy = dy * sp; mvz = dz * sp;
+          mBirth = Math.random() * 0.2;
+          mLife = randRange(1.5, 2.6);
+          mSz = randRange(0.08, 0.12) * (0.7 + size * 0.4);
+          const white = Math.random() < (crackle ? 0.45 : 0.1);
+          const c = Math.random() < 0.5 ? colA : colB;
+          cr = white ? 6.9 : c.r * 6.4; cg = white ? 6.7 : c.g * 6.4; cb = white ? 6.2 : c.b * 6.4;
+          pool.set(i, pos.x, pos.y + 0.2, pos.z, mvx, mvy, mvz, cr, cg, cb,
+            time + mBirth, mLife, mSz, grav, drg, crackle ? 55 : 0,
+            crackle ? (Math.random() < 0.35 ? CELL.CRACKLE : CELL.STAR4) : CELL.GLOW,
+            0.07);
+        } else {
+          pool.set(i, pos.x, pos.y + 0.2, pos.z, mvx, mvy, mvz,
+            cr * 0.45, cg * 0.45, cb * 0.45,
+            time + mBirth + 0.035, mLife * 0.92, mSz * 0.7, grav, drg, 0,
+            CELL.GLOW, 0.07);
+        }
+      });
+    }
+
+    if (crackle && opts.sound !== false) {
+      // the payload cooks off around the top of the column: drop the
+      // crackle chorus at the analytic apex of a mid-speed star
+      const vMid = 41 * spMul;
+      const apexT = Math.log(1 + vMid * drg / 9.81) / drg;
+      const d = Math.max(drg, 1e-4);
+      const k = (1 - Math.exp(-d * apexT)) / d;
+      const apex = pos.clone();
+      apex.x += ax * vMid * k; apex.z += az * vMid * k;
+      apex.y += ay * vMid * k - 9.81 * grav * (apexT - k) / d;
+      this.schedule(apexT * 0.85, () => this.audio.play('crackle', apex, {
+        gain: 0.9, refDistance: 6, send: 0.4, rate: randRange(0.9, 1.05),
+      }));
+    }
   }
 
   _spend(item) {
@@ -1403,7 +1643,7 @@ export class FireworksSystem {
     if (tHit <= 0 || bounceNum >= 3) {
       // clear flight (or out of bounces): burst at the end of the arc,
       // handing the residual shell velocity to the burst so it drifts
-      this._spawnComet(pos, vel, color, sizeMul, { gravity, drag, life: flightT });
+      this._spawnComet(pos, vel, color, sizeMul, { gravity, drag, life: flightT, tail: opts.tail });
       const burstPos = ballistic(pos, vel, flightT, gravity, drag, new THREE.Vector3());
       const burstVel = ballisticVel(vel, flightT, gravity, drag, new THREE.Vector3());
       this.schedule(flightT, () => opts.onBurst(burstPos, burstVel));
@@ -1411,7 +1651,7 @@ export class FireworksSystem {
     }
 
     // streak until the strike, then bounce off the sand
-    this._spawnComet(pos, vel, color, sizeMul, { gravity, drag, life: tHit });
+    this._spawnComet(pos, vel, color, sizeMul, { gravity, drag, life: tHit, tail: opts.tail });
     const hitPos = ballistic(pos, vel, tHit, gravity, drag, new THREE.Vector3());
     const hitVel = ballisticVel(vel, tHit, gravity, drag, new THREE.Vector3());
     this.schedule(tHit, () => {
@@ -1457,7 +1697,7 @@ export class FireworksSystem {
    * must match the ballistic() prediction of the caller so the scheduled
    * burst happens exactly where the streak dies.
    */
-  _spawnComet(pos, vel, color, sizeMul = 1, { gravity = 0.75, drag = 0.55, life = 1.0 } = {}) {
+  _spawnComet(pos, vel, color, sizeMul = 1, { gravity = 0.75, drag = 0.55, life = 1.0, tail } = {}) {
     const pool = this.pool;
     const time = this.time;
     // the comet head plus a short stagger of followers = glowing streak
@@ -1488,6 +1728,28 @@ export class FireworksSystem {
           3.4, 2.4, 1.1,
           time + ts, randRange(0.5, 1.1),
           randRange(0.05, 0.09) * sizeMul, 0.3, 1.6, 28);
+      });
+    }
+    // tremalon rise (tail:'glitter'): glitter chemistry keeps cooking in the
+    // wake AFTER the head is gone — dense gold micro-stars shed along the
+    // arc, each hanging DARK for a beat and then flashing white-gold for a
+    // tenth of a second. Same closed-form precompute as the flecks above:
+    // shed point = arc position at ts, birth = ts + its dark delay, near-zero
+    // inherited velocity + heavy drag so each flash ignites right where the
+    // comet dropped it. The column stays twinkling for ~a second behind.
+    if (tail === 'glitter') {
+      const d = Math.max(drag, 1e-4);
+      const gA = 9.81 * gravity;
+      pool.spawn(Math.round(55 + 65 * sizeMul), (i) => {
+        const ts = Math.random() * life;
+        const k = (1 - Math.exp(-d * ts)) / d;
+        pool.set(i,
+          pos.x + vel.x * k, pos.y + vel.y * k - gA * (ts - k) / d, pos.z + vel.z * k,
+          randRange(-0.5, 0.5), randRange(-0.7, 0.3), randRange(-0.5, 0.5),
+          6.8, 5.7, 3.1,
+          time + ts + randRange(0.1, 0.8), randRange(0.12, 0.2),
+          randRange(0.07, 0.12) * sizeMul, 0.15, 1.6, 0,
+          CELL.STAR6, 0);
       });
     }
   }
@@ -1859,12 +2121,49 @@ export class FireworksSystem {
       });
     };
 
+    /**
+     * spec.pistil — the yae-shin double-petal core: a concentric contrast
+     * sphere fired from the same origin at a fraction of the outer speed
+     * with the SAME gravity/drag, so inner and outer spheres stay nested as
+     * they grow (real two-stage ball shells are pasted exactly this way).
+     * Layered onto peony/chrys/ring/spider/strobewillow by their cases.
+     * Runs dimmer than the petals on purpose — overdriven accent colors
+     * ACES-compress to white, and a pistil must read as COLOR.
+     */
+    const spawnPistil = (outerSpeed, gravity, drag) => {
+      const pc = spec.pistil.color !== undefined
+        ? new THREE.Color(spec.pistil.color) : colB;
+      const ratio = clamp(spec.pistil.ratio ?? 0.38, 0.2, 0.5);
+      const psp = outerSpeed * ratio;
+      const pr = pc.r * 5.7 * glow * 0.85, pg = pc.g * 5.7 * glow * 0.85, pb = pc.b * 5.7 * glow * 0.85;
+      let qj = -1, qvx, qvy, qvz, qLife, qLag;
+      pool.spawn(Math.round((100 + 150 * size) * grandCount) * 2, (i) => {
+        qj++;
+        if (qj % 2 === 0) {
+          const u = Math.random() * 2 - 1;
+          const a = Math.random() * Math.PI * 2;
+          const rr = Math.sqrt(1 - u * u);
+          const sp = psp * randRange(0.9, 1.0); // crisp skin, like the petals
+          qvx = rr * Math.cos(a) * sp + dvx; qvy = u * sp + dvy; qvz = rr * Math.sin(a) * sp + dvz;
+          qLife = randRange(1.7, 2.2) * grandLife;
+          qLag = randRange(0.024, 0.038);
+          pool.set(i, pos.x, pos.y, pos.z, qvx, qvy, qvz, pr, pg, pb,
+            time, qLife, 0.15 * grandPSize, gravity, drag, 0, CELL.GLOW, 0.045);
+        } else {
+          pool.set(i, pos.x, pos.y, pos.z, qvx, qvy, qvz,
+            pr * 0.45, pg * 0.45, pb * 0.45,
+            time + qLag, qLife * 0.95, 0.10 * grandPSize, gravity, drag, 0, CELL.GLOW, 0.045);
+        }
+      });
+    };
+
     switch (pattern) {
-      case 'peony':
+      case 'peony': {
         // small stars on a long shutter: each one draws a fine line radiating
         // from the break, longest right at the break and tightening as drag
         // bites — the long-exposure streamer look of the real thing
-        spawnSphere(spec.count ?? Math.round((310 + 720 * size) * grandCount), spec.speed ?? wideGrandSpeed(12 + 14 * size), {
+        const pSpeed = spec.speed ?? wideGrandSpeed(12 + 14 * size);
+        spawnSphere(spec.count ?? Math.round((310 + 720 * size) * grandCount), pSpeed, {
           shellSkin: true, life: (2.2 + 1.2 * size) * grandLife, drag: slowGrandDrag(0.6), gravity: 0.35,
           psize: 0.12 * grandPSize, trail: 2, stretch: 0.06,
         });
@@ -1873,13 +2172,16 @@ export class FireworksSystem {
         });
         // ~40% of peonies carry a pistil: a slow contrast-color heart inside
         // the sphere, the way real ball shells are often built two-stage
+        // (the choreography can also demand one explicitly via spec.pistil)
         if (Math.random() < 0.4) {
           spawnSphere(Math.round((90 + 150 * size) * grandCount), (4 + 5 * size), {
             shellSkin: true, color: 'b', life: 1.9 * grandLife, drag: 0.8, gravity: 0.3,
             psize: 0.16 * grandPSize, brightness: glow * 0.8, whiteCore: 0.02,
           });
         }
+        if (spec.pistil) spawnPistil(pSpeed, 0.35, slowGrandDrag(0.6));
         break;
+      }
 
       case 'dahlia': {
         // The postcard shell: bi-color rays that burn the shell color at the
@@ -1904,14 +2206,17 @@ export class FireworksSystem {
         break;
       }
 
-      case 'chrys': // brocade-crown chrysanthemum: dense hanging glitter rays
-        spawnRays(Math.min(260, Math.round(95 + 105 * size + 40 * grand)), wideGrandSpeed(11 + 13 * size), {
+      case 'chrys': { // brocade-crown chrysanthemum: dense hanging glitter rays
+        const cSpeed = wideGrandSpeed(11 + 13 * size);
+        spawnRays(Math.min(260, Math.round(95 + 105 * size + 40 * grand)), cSpeed, {
           life: (2.9 + 1.1 * size) * grandLife, drag: slowGrandDrag(0.48), gravity: 0.45,
           flakes: Math.round(30 + 15 * Math.min(size, 1.6)), tipSparkle: true,
           flakeTwinkle: 15, psize: 0.10 * grandPSize,
           flakeBright: 2.6, flakeTint: 0.4, // hold the amber — see spawnRays
         });
+        if (spec.pistil) spawnPistil(cSpeed, 0.45, slowGrandDrag(0.48));
         break;
+      }
 
       case 'willow':
         // long shutter: the drooping branches smear into molten threads
@@ -1960,9 +2265,10 @@ export class FireworksSystem {
 
       case 'ring': {
         // ring in a random plane
+        const rSpeed = spec.speed ?? wideGrandSpeed(14 + 14 * size);
         const n = _v1.set(randRange(-1, 1), randRange(-0.4, 0.4), randRange(-1, 1)).normalize();
-        spawnRing(n, spec.count ?? Math.round((230 + 320 * size) * grandCount),
-          spec.speed ?? wideGrandSpeed(14 + 14 * size));
+        spawnRing(n, spec.count ?? Math.round((230 + 320 * size) * grandCount), rSpeed);
+        if (spec.pistil) spawnPistil(rSpeed, 0.3, slowGrandDrag(0.7));
         break;
       }
 
@@ -2241,6 +2547,707 @@ export class FireworksSystem {
         });
         break;
       }
+
+      case 'thousandbloom': {
+        // senrin-giku, "a thousand chrysanthemums": the shell opens almost
+        // invisibly, scattering dim embers across a huge volume — then, on
+        // ONE cue, every ember pops into a tiny bright color sphere and the
+        // whole sky polka-dots in a single instant. The simultaneity IS the
+        // effect (multibreak scatters its pops; this one must land as one),
+        // so every child star is precomputed here with a shared birth
+        // offset ± 50 ms of fuse tolerance — zero scheduled work per ember.
+        const popT = randRange(1.2, 1.6);
+        const nE = Math.round(120 + 60 * size);
+        const kids = 11;
+        const seg1 = 2 + kids; // ember head + tracer bead + its children
+        const eDrag = 0.5, eGrav = 0.3;
+        const gA = 9.81 * eGrav;
+        // confetti mix: this shell's own colors plus a few strangers
+        const mixCols = [[colA.r, colA.g, colA.b], [colB.r, colB.g, colB.b]];
+        for (let m = 0; m < 3; m++) {
+          const c = new THREE.Color(randPick(PALETTES).a);
+          mixCols.push([c.r, c.g, c.b]);
+        }
+        let tj = -1, evx, evy, evz, eT;
+        pool.spawn(nE * seg1, (i) => {
+          tj++;
+          const seg = tj % seg1;
+          if (seg === 0) {
+            // a dim gold ember, thrown wide and burning low — from the camp
+            // it barely registers, which makes the pop land harder
+            const u = Math.random() * 2 - 1;
+            const a = Math.random() * Math.PI * 2;
+            const rr = Math.sqrt(1 - u * u);
+            const sp = randRange(14, 18) * (0.6 + 0.4 * size);
+            evx = rr * Math.cos(a) * sp + dvx;
+            evy = u * sp + dvy;
+            evz = rr * Math.sin(a) * sp + dvz;
+            eT = popT + randRange(-0.05, 0.05); // per-ember fuse tolerance
+            pool.set(i, pos.x, pos.y, pos.z, evx, evy, evz,
+              1.6, 1.1, 0.42,
+              time, eT, 0.07 * (0.7 + size * 0.4), eGrav, eDrag, 0,
+              CELL.GLOW, 0.045);
+          } else if (seg === 1) {
+            // one faint tracer bead — a "mild trail", not a streamer
+            pool.set(i, pos.x, pos.y, pos.z, evx, evy, evz,
+              0.8, 0.55, 0.2,
+              time + 0.05, eT * 0.95, 0.05 * (0.7 + size * 0.4), eGrav, eDrag, 0,
+              CELL.GLOW, 0.045);
+          } else {
+            // a pop star: born exactly where its ember is at eT (closed-form
+            // arc), keeping a bit of the ember's dying velocity plus its own
+            // small sphere kick — a 5-8 m bloom in a saturated mixed color
+            const k = (1 - Math.exp(-eDrag * eT)) / eDrag;
+            const e = Math.exp(-eDrag * eT);
+            const u = Math.random() * 2 - 1;
+            const a = Math.random() * Math.PI * 2;
+            const rr = Math.sqrt(1 - u * u);
+            const cs = randRange(3.2, 5.2) * (0.75 + 0.35 * size);
+            const col = mixCols[(Math.random() * mixCols.length) | 0];
+            pool.set(i,
+              pos.x + evx * k, pos.y + evy * k - gA * (eT - k) / eDrag, pos.z + evz * k,
+              evx * e * 0.3 + rr * Math.cos(a) * cs,
+              (evy * e - gA * (1 - e) / eDrag) * 0.3 + u * cs,
+              evz * e * 0.3 + rr * Math.sin(a) * cs,
+              col[0] * 5.7 * glow, col[1] * 5.7 * glow, col[2] * 5.7 * glow,
+              time + eT, randRange(0.8, 1.2),
+              0.085 * randRange(0.8, 1.25) * (0.7 + size * 0.4), 0.32, 0.85, 0,
+              CELL.GLOW, 0.03);
+          }
+        });
+        // the pop is a CLOUD of small reports, not one boom: overlapping
+        // slow crackle plus a few lone crackers placed inside the cloud
+        // (a handful of whole-cloud schedules — never one per ember)
+        const cpos = pos.clone();
+        this.schedule(popT, () => this.audio.play('crackle', cpos, {
+          gain: 1.0, refDistance: 8, send: 0.45, rate: randRange(0.6, 0.72),
+        }));
+        this.schedule(popT + 0.05, () => this.audio.play('crackle', cpos, {
+          gain: 0.8, refDistance: 8, send: 0.45, rate: randRange(0.74, 0.86),
+        }));
+        for (let c = 0; c < 3; c++) {
+          const cp = pos.clone();
+          cp.x += randRange(-9, 9); cp.y += randRange(-5, 5); cp.z += randRange(-9, 9);
+          this.schedule(popT + randRange(-0.04, 0.12), () => this.audio.play('cracker', cp, {
+            gain: randRange(0.5, 0.8), refDistance: 5, send: 0.4, rate: randRange(0.8, 1.05),
+          }));
+        }
+        break;
+      }
+
+      case 'bees':
+      case 'fish': {
+        // poka-shell swarms: stars that refuse to fall ballistically. Each
+        // one darts through 6-9 straight-ish legs, veering hard between
+        // them — a panicked bee cloud (tight, frantic, ~2 s) or a school of
+        // fish swimming clean across the sky (faster, longer legs, 3 s).
+        // Every leg is its own precomputed particle: spawn point = the
+        // closed-form end of the previous leg, birth = the moment the star
+        // gets there — the chain reads as ONE continuous living streak with
+        // zero runtime cost. Silent, like the real inserts.
+        const beesKind = pattern === 'bees';
+        const nStars = beesKind ? Math.round(30 + 20 * size) : Math.round(21 + 14 * size);
+        const grav = 0.25, drg = beesKind ? 0.4 : 0.3;
+        const beads = beesKind ? 2 : 3; // fish tow fatter tails
+        const per = beads + 1;
+        // chain the legs first (flat records), then spawn them in one call
+        const legs = [];
+        const dir = new THREE.Vector3(), axis = new THREE.Vector3();
+        const pp = new THREE.Vector3(), pv = new THREE.Vector3();
+        for (let s = 0; s < nStars; s++) {
+          const nSeg = beesKind ? 6 + ((Math.random() * 4) | 0) : 7 + ((Math.random() * 3) | 0);
+          const spd = beesKind ? randRange(8, 13) : randRange(18, 26);
+          const u0 = randRange(-0.55, 0.9); // hang the swarm in view, not below it
+          const a0 = Math.random() * Math.PI * 2;
+          const rr0 = Math.sqrt(Math.max(0, 1 - u0 * u0));
+          dir.set(rr0 * Math.cos(a0), u0, rr0 * Math.sin(a0));
+          pp.copy(pos);
+          let t0 = 0;
+          const flip = Math.random() < 0.5 ? 1 : 0;
+          for (let g2 = 0; g2 < nSeg; g2++) {
+            const dur = beesKind ? randRange(0.2, 0.3) : randRange(0.35, 0.5);
+            pv.set(dir.x * spd + dvx, dir.y * spd + dvy, dir.z * spd + dvz);
+            legs.push(pp.x, pp.y, pp.z, pv.x, pv.y, pv.z, t0, dur, flip);
+            ballistic(pp, pv, dur, grav, drg, pp);
+            t0 += dur;
+            // the veer: rotate the heading 40-70° (bees) / 30-55° (fish)
+            // around a random axis perpendicular to it
+            axis.set(randRange(-1, 1), randRange(-1, 1), randRange(-1, 1)).cross(dir);
+            if (axis.lengthSq() < 1e-4) axis.set(dir.y, -dir.x, 0.11);
+            axis.normalize();
+            _q1.setFromAxisAngle(axis,
+              (beesKind ? randRange(0.7, 1.22) : randRange(0.52, 0.96)) * (Math.random() < 0.5 ? -1 : 1));
+            dir.applyQuaternion(_q1);
+            // never let the school bore straight down out of the sky
+            if (dir.y < -0.75) { dir.y = -dir.y * 0.5; dir.normalize(); }
+          }
+        }
+        const nLegs = legs.length / 9;
+        const br = (beesKind ? 5.0 : 6.3) * glow;
+        let lj = -1;
+        pool.spawn(nLegs * per, (i) => {
+          lj++;
+          const leg = (lj / per) | 0;
+          const seg = lj - leg * per;
+          const o = leg * 9;
+          const c = legs[o + 8] ? colA : colB;
+          const fade = seg === 0 ? 1 : (1 - seg / per) * 0.5;
+          pool.set(i,
+            legs[o], legs[o + 1], legs[o + 2],
+            legs[o + 3], legs[o + 4], legs[o + 5],
+            c.r * br * fade, c.g * br * fade, c.b * br * fade,
+            time + legs[o + 6] + seg * 0.035,
+            legs[o + 7] * (seg === 0 ? randRange(1.08, 1.3) : randRange(0.95, 1.1)),
+            (beesKind ? randRange(0.055, 0.08) : randRange(0.10, 0.14))
+              * (seg === 0 ? 1 : 0.7) * (0.7 + size * 0.4),
+            grav, drg, 0,
+            CELL.GLOW, beesKind ? 0.085 : 0.07);
+        });
+        break;
+      }
+
+      case 'dragoneggs': {
+        // bismuth delayed-crackle microstars: a dense cloud of dim amber
+        // embers hangs almost still (high drag), then pops off like corn —
+        // each ember relays to a white-gold flash (shiftT + the shader's
+        // ignition pop) and throws a couple of branchy crackle children,
+        // the cluster spreading over ~1.2 s. All precomputed at break.
+        const nE = Math.round(360 + 240 * size);
+        const eGrav = 0.22, eDrag = 1.1;
+        const gA = 9.81 * eGrav;
+        let dj = -1, evx, evy, evz, eTp;
+        pool.spawn(nE * 3, (i) => {
+          dj++;
+          const seg = dj % 3;
+          if (seg === 0) {
+            const u = Math.random() * 2 - 1;
+            const a = Math.random() * Math.PI * 2;
+            const rr = Math.sqrt(1 - u * u);
+            const sp = randRange(8, 14) * (0.65 + 0.35 * size);
+            evx = rr * Math.cos(a) * sp + dvx;
+            evy = u * sp + dvy;
+            evz = rr * Math.sin(a) * sp + dvz;
+            eTp = randRange(0.5, 1.7); // lazy drift, then the crack
+            const life = eTp + randRange(0.1, 0.16);
+            pool.set(i, pos.x, pos.y, pos.z, evx, evy, evz,
+              1.3, 0.82, 0.3, // dim amber — the "is that all?" phase
+              time, life, randRange(0.06, 0.09) * (0.7 + size * 0.4),
+              eGrav, eDrag, 0,
+              CELL.GLOW, 0, undefined, eTp / life,
+              7.2, 6.4, 4.2); // ...it was not
+          } else {
+            // a crackle child popping off the flash, dead in a fifth of a
+            // second — placed on the ember's arc at its pop time
+            const k = (1 - Math.exp(-eDrag * eTp)) / eDrag;
+            const u = Math.random() * 2 - 1;
+            const a = Math.random() * Math.PI * 2;
+            const rr = Math.sqrt(1 - u * u);
+            const cs = randRange(1.2, 2.8);
+            pool.set(i,
+              pos.x + evx * k, pos.y + evy * k - gA * (eTp - k) / eDrag, pos.z + evz * k,
+              rr * Math.cos(a) * cs, u * cs, rr * Math.sin(a) * cs,
+              6.8, 5.8, 3.4,
+              time + eTp, randRange(0.1, 0.2),
+              randRange(0.10, 0.16) * (0.7 + size * 0.4), 0.3, 1.2, 0,
+              CELL.CRACKLE, 0);
+          }
+        });
+        // the frying-pan chorus rides the pop window, two takes offset
+        const cpos = pos.clone();
+        this.schedule(0.55, () => this.audio.play('crackle', cpos, {
+          gain: 0.85, refDistance: 7, send: 0.4, rate: randRange(0.86, 0.96),
+        }));
+        this.schedule(0.95, () => this.audio.play('crackle', cpos, {
+          gain: 0.7, refDistance: 7, send: 0.4, rate: randRange(0.74, 0.84),
+        }));
+        break;
+      }
+
+      case 'spider': {
+        // the spider shell: a violent break driving FEW stars out near twice
+        // peony speed on maximum shutter — each arm is one star smeared into
+        // a long straight metallic thread, and heavy gravity droops only the
+        // tips. Wider than a same-caliber peony for a tenth of the stars —
+        // the cheapest huge shell in the book.
+        const n = Math.round(55 + 40 * size);
+        const speed = wideGrandSpeed((12 + 14 * size) * 1.7);
+        const beads = 6;
+        const grav = randRange(1.1, 1.3);
+        // metallic: the shell color pushed most of the way to white-silver
+        const mr = (colA.r + (1 - colA.r) * 0.55) * 5.7 * glow;
+        const mg = (colA.g + (1 - colA.g) * 0.55) * 5.7 * glow;
+        const mb = (colA.b + (1 - colA.b) * 0.55) * 5.7 * glow;
+        // half the spiders relay their tips to the accent color late in the
+        // fall — the arm ends catch a second composition as they droop
+        const tipShift = Math.random() < 0.5 ? 0.74 : 0;
+        const s2r = colB.r * 5.7 * glow, s2g = colB.g * 5.7 * glow, s2b = colB.b * 5.7 * glow;
+        let sj = -1, svx, svy, svz, sLife, sLag, sSz, sStretch;
+        pool.spawn(n * (beads + 1), (i) => {
+          sj++;
+          const seg = sj % (beads + 1);
+          if (seg === 0) {
+            const u = Math.random() * 2 - 1;
+            const a = Math.random() * Math.PI * 2;
+            const rr = Math.sqrt(1 - u * u);
+            const sp = speed * randRange(0.94, 1.0); // hard, even break
+            svx = rr * Math.cos(a) * sp + dvx;
+            svy = u * sp + dvy;
+            svz = rr * Math.sin(a) * sp + dvz;
+            sLife = randRange(2.0, 2.6) * grandLife;
+            sLag = randRange(0.02, 0.032);
+            sSz = randRange(0.10, 0.14) * grandPSize;
+            sStretch = randRange(0.09, 0.12);
+            pool.set(i, pos.x, pos.y, pos.z, svx, svy, svz, mr, mg, mb,
+              time, sLife, sSz, grav, 0.35, 0,
+              CELL.GLOW, sStretch, undefined, tipShift, s2r, s2g, s2b);
+          } else {
+            const fade = (1 - seg / (beads + 1)) * 0.55;
+            pool.set(i, pos.x, pos.y, pos.z, svx, svy, svz,
+              mr * fade, mg * fade, mb * fade,
+              time + seg * sLag, sLife * (1 - 0.08 * (seg / (beads + 1))),
+              sSz * (0.5 + 0.4 * (1 - seg / (beads + 1))), grav, 0.35, 0,
+              CELL.GLOW, sStretch, undefined, tipShift,
+              s2r * fade, s2g * fade, s2b * fade);
+          }
+        });
+        if (spec.pistil) spawnPistil(speed, grav, 0.35);
+        break;
+      }
+
+      case 'farfalle': {
+        // Italian butterflies: spinning inserts with two opposed vents, each
+        // spraying a pair of spark jets that rotate 2-4 rev/s as the insert
+        // tumbles away — every insert paints a fluttering glowing bow-tie.
+        // The rotating opposed-pair emission is all precomputed: spark pair
+        // p is placed on the insert's closed-form arc at its emission time
+        // with the vent azimuth advanced to that moment. Real ones hum;
+        // ours honor the audio lock and flutter silently.
+        const inserts = Math.round(10 + 8 * size);
+        const pairs = 26;
+        const seg1 = 1 + pairs * 2;
+        const iGrav = 0.35, iDrag = 0.8;
+        const gA = 9.81 * iGrav;
+        let fj = -1, ivx, ivy, ivz, iT, iPhase, iOmega, iFlip,
+          iux, iuy, iuz, iwx, iwy, iwz;
+        pool.spawn(inserts * seg1, (i) => {
+          fj++;
+          const seg = fj % seg1;
+          if (seg === 0) {
+            const u = Math.random() * 2 - 1;
+            const a = Math.random() * Math.PI * 2;
+            const rr = Math.sqrt(1 - u * u);
+            const sp = randRange(8, 12) * (0.75 + 0.35 * size);
+            ivx = rr * Math.cos(a) * sp + dvx;
+            ivy = u * sp + dvy;
+            ivz = rr * Math.sin(a) * sp + dvz;
+            iT = randRange(1.9, 2.7);
+            iPhase = Math.random() * Math.PI * 2;
+            iOmega = randRange(2, 4) * Math.PI * 2;
+            iFlip = Math.random() < 0.5;
+            // vent plane: two axes roughly perpendicular to the toss
+            const il = Math.hypot(ivx, ivy, ivz) || 1;
+            const nx2 = ivx / il, ny2 = ivy / il, nz2 = ivz / il;
+            let cx = -nz2, cy = 0, cz = nx2; // n × UP
+            let cl = Math.hypot(cx, cy, cz);
+            if (cl < 0.05) { cx = 1; cy = 0; cz = 0; cl = 1; }
+            iux = cx / cl; iuy = cy / cl; iuz = cz / cl;
+            iwx = ny2 * iuz - nz2 * iuy;
+            iwy = nz2 * iux - nx2 * iuz;
+            iwz = nx2 * iuy - ny2 * iux;
+            // the insert itself: a modest tumbling ember
+            pool.set(i, pos.x, pos.y, pos.z, ivx, ivy, ivz,
+              colA.r * 3.2 * glow, colA.g * 3.2 * glow, colA.b * 3.2 * glow,
+              time, iT, 0.09 * (0.7 + size * 0.4), iGrav, iDrag, 0,
+              CELL.GLOW, 0.03);
+          } else {
+            // one wing spark of an opposed pair, on the arc at its moment
+            const p = (seg - 1) >> 1;
+            const sgn = (seg - 1) & 1 ? -1 : 1;
+            const te = ((p + Math.random() * 0.7) / pairs) * iT * 0.96;
+            const k = (1 - Math.exp(-iDrag * te)) / iDrag;
+            const e = Math.exp(-iDrag * te);
+            const phi = iPhase + iOmega * te;
+            const jx = iux * Math.cos(phi) + iwx * Math.sin(phi);
+            const jy = iuy * Math.cos(phi) + iwy * Math.sin(phi);
+            const jz = iuz * Math.cos(phi) + iwz * Math.sin(phi);
+            const js = randRange(3.5, 6.5) * sgn;
+            const c = iFlip ? colA : colB;
+            pool.set(i,
+              pos.x + ivx * k, pos.y + ivy * k - gA * (te - k) / iDrag, pos.z + ivz * k,
+              jx * js + ivx * e * 0.5, jy * js + (ivy * e - gA * (1 - e) / iDrag) * 0.5, jz * js + ivz * e * 0.5,
+              c.r * 6.0 * glow, c.g * 6.0 * glow, c.b * 6.0 * glow,
+              time + te, randRange(0.3, 0.45),
+              randRange(0.055, 0.075) * (0.7 + size * 0.4), 0.25, 1.0, 0,
+              CELL.GLOW, 0.075);
+          }
+        });
+        break;
+      }
+
+      case 'tourbillon': {
+        // whirlwinds (Handel fired these in 1749): silver spinners thrown
+        // up-and-out of the break, each corkscrewing a tight helical ribbon
+        // of sparks behind it — drill-bits of light climbing the sky. The
+        // helix is pure precompute: spark k sits on the riser's closed-form
+        // arc with the emission azimuth advanced 5-8 rev/s, offset 0.8-1.5 m
+        // sideways, and hangs where the spinner left it.
+        const spinners = Math.round(7 + 5 * size);
+        const sparks = 86, popStars = 4;
+        const seg1 = 1 + sparks + popStars;
+        const tGrav = 0.16, tDrag = 0.55; // burning spinners barely fall
+        const gA = 9.81 * tGrav;
+        let hj = -1, hvx, hvy, hvz, hT, hPhase, hOmega, hR,
+          hux, huy, huz, hwx, hwy, hwz;
+        pool.spawn(spinners * seg1, (i) => {
+          hj++;
+          const seg = hj % seg1;
+          if (seg === 0) {
+            // the riser: strongly up-biased, with a random lean
+            const dy = randRange(0.72, 0.96);
+            const a = Math.random() * Math.PI * 2;
+            const rr = Math.sqrt(1 - dy * dy);
+            const sp = randRange(18, 28) * (0.75 + 0.35 * size);
+            hvx = rr * Math.cos(a) * sp + dvx;
+            hvy = dy * sp + dvy;
+            hvz = rr * Math.sin(a) * sp + dvz;
+            hT = 1.4 * randRange(0.85, 1.15);
+            hPhase = Math.random() * Math.PI * 2;
+            hOmega = randRange(5, 8) * Math.PI * 2;
+            hR = randRange(0.8, 1.5);
+            const il = Math.hypot(hvx, hvy, hvz) || 1;
+            const nx2 = hvx / il, ny2 = hvy / il, nz2 = hvz / il;
+            let cx = -nz2, cy = 0, cz = nx2;
+            let cl = Math.hypot(cx, cy, cz);
+            if (cl < 0.05) { cx = 1; cy = 0; cz = 0; cl = 1; }
+            hux = cx / cl; huy = cy / cl; huz = cz / cl;
+            hwx = ny2 * huz - nz2 * huy;
+            hwy = nz2 * hux - nx2 * huz;
+            hwz = nx2 * huy - ny2 * hux;
+            pool.set(i, pos.x, pos.y, pos.z, hvx, hvy, hvz,
+              5.4 * glow, 5.5 * glow, 6.0 * glow, // silver head
+              time, hT, 0.11 * (0.7 + size * 0.4), tGrav, tDrag, 0,
+              CELL.GLOW, 0.06);
+          } else if (seg <= sparks) {
+            const ts = ((seg - 1 + Math.random() * 0.9) / sparks) * hT;
+            const k = (1 - Math.exp(-tDrag * ts)) / tDrag;
+            const e = Math.exp(-tDrag * ts);
+            const phi = hPhase + hOmega * ts;
+            const ox = hux * Math.cos(phi) + hwx * Math.sin(phi);
+            const oy = huy * Math.cos(phi) + hwy * Math.sin(phi);
+            const oz = huz * Math.cos(phi) + hwz * Math.sin(phi);
+            pool.set(i,
+              pos.x + hvx * k + ox * hR,
+              pos.y + hvy * k - gA * (ts - k) / tDrag + oy * hR,
+              pos.z + hvz * k + oz * hR,
+              ox * randRange(1.2, 2.4) + hvx * e * 0.3,
+              oy * randRange(1.2, 2.4) + (hvy * e - gA * (1 - e) / tDrag) * 0.3,
+              oz * randRange(1.2, 2.4) + hvz * e * 0.3,
+              4.9 * glow, 5.0 * glow, 5.5 * glow,
+              time + ts, randRange(0.35, 0.6),
+              randRange(0.05, 0.08) * (0.7 + size * 0.4), 0.12, 1.3, 0,
+              CELL.GLOW, 0.04);
+          } else {
+            // terminal mini-pop: a few bright stars where the burn dies
+            const k = (1 - Math.exp(-tDrag * hT)) / tDrag;
+            const u = Math.random() * 2 - 1;
+            const a = Math.random() * Math.PI * 2;
+            const rr = Math.sqrt(1 - u * u);
+            const cs = randRange(4.5, 7);
+            pool.set(i,
+              pos.x + hvx * k, pos.y + hvy * k - gA * (hT - k) / tDrag, pos.z + hvz * k,
+              rr * Math.cos(a) * cs, u * cs, rr * Math.sin(a) * cs,
+              6.5, 6.4, 6.0,
+              time + hT, randRange(0.5, 0.8),
+              randRange(0.09, 0.13) * (0.7 + size * 0.4), 0.3, 0.9, 0,
+              CELL.STAR6, 0);
+          }
+        });
+        // one or two dry cracker pops as spinners spend themselves at apex
+        for (let c = 0; c < 2; c++) {
+          const cp = pos.clone();
+          cp.x += randRange(-8, 8); cp.y += randRange(14, 24); cp.z += randRange(-8, 8);
+          this.schedule(1.4 * randRange(0.9, 1.1), () => this.audio.play('cracker', cp, {
+            gain: randRange(0.5, 0.7), refDistance: 5, send: 0.4, rate: randRange(0.85, 1.0),
+          }));
+        }
+        break;
+      }
+
+      case 'heart':
+      case 'smiley':
+      case 'star5': {
+        // pattern shells: stars pasted to a cardboard former, so the break
+        // throws them outward preserving a 2D arrangement. Real crews fire
+        // several and hope one faces the crowd; in VR we cheat the plane
+        // toward the campsite — normal aimed at the basin's sky-line, then
+        // tipped a random 15-25° so volleys don't look machine-aimed. Two
+        // tracer beads give the shape enough depth to survive side angles.
+        const pts = pattern === 'heart' ? HEART_PTS
+          : pattern === 'smiley' ? SMILEY_PTS : STAR5_PTS;
+        const n = _v1.set(-pos.x, 40 - pos.y, -pos.z).normalize();
+        _q1.setFromAxisAngle(n, Math.random() * Math.PI * 2); // random tilt bearing
+        _v2.crossVectors(n, Math.abs(n.y) < 0.9 ? UP : X_AXIS).normalize().applyQuaternion(_q1);
+        _q1.setFromAxisAngle(_v2, randRange(0.26, 0.44) * (Math.random() < 0.5 ? -1 : 1));
+        n.applyQuaternion(_q1);
+        // in-plane frame: u horizontal, w = u × n points sky-up so the
+        // heart's notch and the smiley's grin land the right way round
+        const ub = _v2.crossVectors(n, UP);
+        if (ub.lengthSq() < 0.01) ub.crossVectors(n, X_AXIS);
+        ub.normalize();
+        const wb = _v3.crossVectors(ub, n).normalize();
+        const ux = ub.x, uy = ub.y, uz = ub.z;
+        const wx = wb.x, wy = wb.y, wz = wb.z;
+        const nx2 = n.x, ny2 = n.y, nz2 = n.z;
+        const sp = 13 + 8 * size; // ~1 s expansion to a 25-30 m figure
+        const nPts = pts.length / 3;
+        let gj = -1, gvx, gvy, gvz, gcr, gcg, gcb, gLife, gLag;
+        pool.spawn(nPts * 3, (i) => {
+          gj++;
+          const seg = gj % 3;
+          if (seg === 0) {
+            const o = ((gj / 3) | 0) * 3;
+            const px2 = pts[o], py2 = pts[o + 1];
+            const c = pts[o + 2] ? colB : colA;
+            const jn = randRange(-0.35, 0.35); // whisker of depth
+            gvx = (ux * px2 + wx * py2) * sp + nx2 * jn + dvx + randRange(-0.15, 0.15);
+            gvy = (uy * px2 + wy * py2) * sp + ny2 * jn + dvy + randRange(-0.15, 0.15);
+            gvz = (uz * px2 + wz * py2) * sp + nz2 * jn + dvz + randRange(-0.15, 0.15);
+            gcr = c.r * 5.7 * glow; gcg = c.g * 5.7 * glow; gcb = c.b * 5.7 * glow;
+            gLife = randRange(2.2, 2.8);
+            gLag = randRange(0.024, 0.038);
+            pool.set(i, pos.x, pos.y, pos.z, gvx, gvy, gvz, gcr, gcg, gcb,
+              time, gLife, 0.13 * (0.7 + size * 0.5), 0.22, 0.8, 0,
+              CELL.GLOW, 0.035);
+          } else {
+            const fade = (1 - seg / 3) * 0.55;
+            pool.set(i, pos.x, pos.y, pos.z, gvx, gvy, gvz,
+              gcr * fade, gcg * fade, gcb * fade,
+              time + seg * gLag, gLife * 0.95,
+              0.13 * (0.7 + size * 0.5) * 0.7, 0.22, 0.8, 0,
+              CELL.GLOW, 0.035);
+          }
+        });
+        break;
+      }
+
+      case 'flare': {
+        // parachute flares: the show's breather. A soft pop drops 1 (small)
+        // or 3 (display) brilliant magnesium lights that sink at ~3 m/s for
+        // 12-18 s, pendulum-swaying, shedding thin smoke and the odd gold
+        // drip. The whole descent is precomputed as chained sway legs
+        // (closed-form, like every delayed effect here); one emitter entry
+        // follows the lead flare's path to drive a pooled light so the
+        // desert really is lit by the thing — unlit gracefully if both
+        // slots are working fountains. Silent.
+        const nF = size < 1 ? 1 : 3;
+        const gF = 1.0, dF = 3.2; // terminal ≈ 9.81/3.2 ≈ 3 m/s under canopy
+        const FLARE_COLS = [[1, 0.97, 0.9], [1, 0.24, 0.17], [0.38, 1, 0.44]];
+        for (let f = 0; f < nF; f++) {
+          const col = FLARE_COLS[(Math.random() * FLARE_COLS.length) | 0];
+          const L = randRange(12, 18);
+          const p0 = pos.clone();
+          p0.x += randRange(-4, 4); p0.y += randRange(-1.5, 1.5); p0.z += randRange(-4, 4);
+          // pendulum: one sway plane per flare, legs alternating direction
+          const swA = Math.random() * Math.PI * 2;
+          const swx = Math.cos(swA), swz = Math.sin(swA);
+          const path = [];
+          const pp = p0.clone();
+          const pv = new THREE.Vector3();
+          let t0 = 0, sgn = Math.random() < 0.5 ? 1 : -1;
+          while (t0 < L) {
+            const dur = Math.min(randRange(1.5, 2.0), L - t0 + 0.01);
+            const A = randRange(2.4, 3.8);
+            pv.set(
+              swx * A * sgn + (t0 === 0 ? dvx * 0.5 : 0),
+              -2.6,
+              swz * A * sgn + (t0 === 0 ? dvz * 0.5 : 0),
+            );
+            path.push({ t0, dur, x: pp.x, y: pp.y, z: pp.z, vx: pv.x, vy: pv.y, vz: pv.z });
+            ballistic(pp, pv, dur, gF, dF, pp);
+            t0 += dur;
+            sgn = -sgn;
+          }
+          // visuals: per sway leg — the flare head, its bloom halo, a few
+          // smoke wisps and a couple of gold drips, all birth-offset onto
+          // the leg's exact arc
+          const seg1 = 9; // head + halo + 5 smoke + 2 drips
+          const fsz = 0.24 * (0.75 + 0.35 * size);
+          const gA = 9.81 * gF;
+          let pj = -1;
+          pool.spawn(path.length * seg1, (i) => {
+            pj++;
+            const leg = path[(pj / seg1) | 0];
+            const seg = pj % seg1;
+            if (seg === 0) {
+              // the flare itself: brilliant, with the slow ~5 Hz waver a
+              // burning magnesium candle has under a rocking parachute
+              pool.set(i, leg.x, leg.y, leg.z, leg.vx, leg.vy, leg.vz,
+                col[0] * 7.8, col[1] * 7.8, col[2] * 7.8,
+                time + leg.t0 - (leg.t0 > 0 ? 0.02 : 0), leg.dur + 0.1,
+                fsz, gF, dF, 5,
+                CELL.GLOW, 0);
+            } else if (seg === 1) {
+              // fat dim halo on the same arc — the lens bloom of a light
+              // source far too bright for the night around it
+              pool.set(i, leg.x, leg.y, leg.z, leg.vx, leg.vy, leg.vz,
+                col[0] * 1.1, col[1] * 1.1, col[2] * 1.1,
+                time + leg.t0, leg.dur,
+                fsz * 4.2, gF, dF, 0,
+                CELL.GLOW, 0);
+            } else if (seg <= 6) {
+              // the thin smoke thread every flare hangs above itself
+              const ts = Math.random() * leg.dur;
+              const k = (1 - Math.exp(-dF * ts)) / dF;
+              pool.set(i,
+                leg.x + leg.vx * k + randRange(-0.2, 0.2),
+                leg.y + leg.vy * k - gA * (ts - k) / dF,
+                leg.z + leg.vz * k + randRange(-0.2, 0.2),
+                randRange(-0.25, 0.25), randRange(0.1, 0.45), randRange(-0.25, 0.25),
+                0.42, 0.42, 0.45,
+                time + leg.t0 + ts, randRange(2.5, 5),
+                randRange(0.35, 0.65), -0.01, 1.3, -1);
+            } else {
+              // an occasional gold drip spilling off the burning end
+              const ts = Math.random() * leg.dur;
+              const k = (1 - Math.exp(-dF * ts)) / dF;
+              const e = Math.exp(-dF * ts);
+              pool.set(i,
+                leg.x + leg.vx * k, leg.y + leg.vy * k - gA * (ts - k) / dF, leg.z + leg.vz * k,
+                leg.vx * e + randRange(-1.6, 1.6), -randRange(0.5, 1.5), leg.vz * e + randRange(-1.6, 1.6),
+                3.4, 2.4, 1.0,
+                time + leg.t0 + ts, randRange(0.6, 1.2) * (Math.random() < 0.55 ? 1 : 0.3),
+                randRange(0.04, 0.06), 0.55, 0.9, 26);
+            }
+          });
+          // one pooled light follows the LEAD flare only — flares come in
+          // threes, fountain slots come in twos, and one moving key light
+          // already sells the whole cluster
+          if (f === 0) {
+            this.emitters.push({
+              kind: 'flare', age: 0, duration: L, path, g: gF, d: dF,
+              color: new THREE.Color(col[0], col[1], col[2]), lightSlot: null,
+              intensity: 260 + 240 * Math.min(size, 1.6),
+            });
+          }
+        }
+        break;
+      }
+
+      case 'strobewillow': {
+        // strobe willow, the "shimmering sea": a golden willow that goes
+        // near-dark a quarter into the fall — and then hundreds of white
+        // STAR4 flashes blink asynchronously all down the hanging curtain
+        // for seconds, moonlight on waves. Every blink is precomputed on
+        // its star's exact fall path (same gravity/drag), phased 0.3-0.5 s
+        // apart at random offsets — no scheduled work, no sound.
+        const n = Math.round(180 + 105 * size);
+        const beads = 3, blinks = 10;
+        const seg1 = 1 + beads + blinks;
+        const wGrav = 0.42, wDrag = 0.38;
+        const gA = 9.81 * wGrav;
+        const spBase = randRange(7, 9) * (0.7 + 0.3 * size);
+        const dkr = colA.r * 0.4, dkg = colA.g * 0.4, dkb = colA.b * 0.4; // near-dark relay
+        let wj = -1, wvx, wvy, wvz, wLife, wLag, wSz;
+        pool.spawn(n * seg1, (i) => {
+          wj++;
+          const seg = wj % seg1;
+          if (seg === 0) {
+            const u = Math.random() * 2 - 1;
+            const a = Math.random() * Math.PI * 2;
+            const rr = Math.sqrt(1 - u * u);
+            const sp = spBase * randRange(0.55, 1.0);
+            wvx = rr * Math.cos(a) * sp + dvx;
+            wvy = u * sp + dvy;
+            wvz = rr * Math.sin(a) * sp + dvz;
+            wLife = randRange(5, 7);
+            wLag = randRange(0.026, 0.042);
+            wSz = randRange(0.075, 0.105) * (0.7 + size * 0.4);
+            pool.set(i, pos.x, pos.y, pos.z, wvx, wvy, wvz,
+              colA.r * 5.7 * glow, colA.g * 5.7 * glow, colA.b * 5.7 * glow,
+              time, wLife, wSz, wGrav, wDrag, 0,
+              CELL.GLOW, 0.055, undefined, 0.25, dkr, dkg, dkb);
+          } else if (seg <= beads) {
+            const fade = (1 - seg / (beads + 1)) * 0.55;
+            pool.set(i, pos.x, pos.y, pos.z, wvx, wvy, wvz,
+              colA.r * 5.7 * glow * fade, colA.g * 5.7 * glow * fade, colA.b * 5.7 * glow * fade,
+              time + seg * wLag, wLife * 0.96,
+              wSz * (0.5 + 0.4 * (1 - seg / (beads + 1))), wGrav, wDrag, 0,
+              CELL.GLOW, 0.055, undefined, 0.25, dkr * fade, dkg * fade, dkb * fade);
+          } else {
+            // a blink: 0.1 s of white STAR4 riding the star's fall path,
+            // stratified phases so neighbours never sync up
+            const b = seg - beads - 1;
+            const bt = wLife * (0.28 + 0.64 * (b + Math.random() * 0.8) / blinks);
+            const k = (1 - Math.exp(-wDrag * bt)) / wDrag;
+            const e = Math.exp(-wDrag * bt);
+            pool.set(i,
+              pos.x + wvx * k, pos.y + wvy * k - gA * (bt - k) / wDrag, pos.z + wvz * k,
+              wvx * e * 0.92, (wvy * e - gA * (1 - e) / wDrag) * 0.92, wvz * e * 0.92,
+              7.5, 7.4, 7.0,
+              time + bt, randRange(0.08, 0.13),
+              randRange(0.12, 0.18) * (0.7 + size * 0.4), wGrav, wDrag, 0,
+              CELL.STAR4, 0);
+          }
+        });
+        if (spec.pistil) spawnPistil(spBase, wGrav, wDrag);
+        break;
+      }
+
+      case 'lampare': {
+        // the lampare: an Italian shell carrying liquid fuel — not sparks,
+        // a FIREBALL. A boiling mass of flame quads blooms in a third of a
+        // second, rolls white-yellow → orange → deep red (shiftT relay),
+        // then leaves a rising ring of black smoke and a handful of gold
+        // stragglers. Reads like a movie explosion; the choreography fires
+        // it rarely and with sound:'big' — the locked boom already IS the
+        // right voice for it.
+        const nFl = Math.round(200 + 130 * size);
+        const scale2 = 0.65 + 0.45 * size;
+        pool.spawn(nFl, (i) => {
+          const u2 = Math.random(); // birth stagger: later = looser + bigger
+          const u = Math.random() * 2 - 1;
+          const a = Math.random() * Math.PI * 2;
+          const rr = Math.sqrt(1 - u * u);
+          const sp = randRange(8, 15) * scale2 * (0.7 + u2 * 0.6);
+          const smoky = Math.random() < 0.6;
+          const life = randRange(0.8, 1.4);
+          pool.set(i,
+            pos.x, pos.y, pos.z,
+            rr * Math.cos(a) * sp + dvx, u * sp * 0.85 + dvy, rr * Math.sin(a) * sp + dvz,
+            5.6, 4.4, 2.4, // white-yellow furnace core...
+            time + u2 * 0.35, life,
+            randRange(0.5, 1.0) * scale2 * (1 + u2 * 0.9), -0.06, 1.7, 0,
+            smoky ? CELL.SMOKE_A + ((Math.random() * 3) | 0) : CELL.GLOW,
+            0, smoky ? randRange(-1.8, 1.8) : 0,
+            randRange(0.32, 0.5),
+            1.5, 0.22, 0.06); // ...rolling over to deep fuel-fire red
+        });
+        // the soot: a dark ring of real occluding smoke rising off the ball
+        pool.spawn(10, (i) => {
+          const a = (i / 10) * Math.PI * 2 + Math.random() * 0.3;
+          const rr = randRange(2.5, 4) * scale2;
+          pool.set(i,
+            pos.x + Math.cos(a) * rr, pos.y + randRange(0.5, 1.5), pos.z + Math.sin(a) * rr,
+            Math.cos(a) * 0.7, randRange(1.0, 1.8), Math.sin(a) * 0.7,
+            0.16, 0.15, 0.15,
+            time + randRange(0.5, 0.9), randRange(4.5, 7.5),
+            randRange(1.2, 2.2) * scale2, -0.02, 1.3, -1);
+        });
+        // gold stragglers thrown clear of the ball
+        pool.spawn(14, (i) => {
+          const u = Math.random() * 2 - 1;
+          const a = Math.random() * Math.PI * 2;
+          const rr = Math.sqrt(1 - u * u);
+          const sp = randRange(6, 12) * scale2;
+          pool.set(i,
+            pos.x, pos.y, pos.z,
+            rr * Math.cos(a) * sp + dvx, Math.abs(u) * sp * 0.8 + dvy, rr * Math.sin(a) * sp + dvz,
+            3.6, 2.5, 1.0,
+            time, randRange(1.4, 2.4),
+            randRange(0.06, 0.09) * scale2, 0.55, 0.8, 22);
+        });
+        break;
+      }
     }
 
     // sparkle pass: a halo of strobing white-hot glitter dust threaded
@@ -2251,7 +3258,8 @@ export class FireworksSystem {
     // rays that ARE the look, and its ray tips already sparkle.
     const selfTwinkling = pattern === 'chrys' || pattern === 'crackle' || pattern === 'strobe'
       || pattern === 'dahlia' || pattern === 'kamuro' || pattern === 'timerain'
-      || pattern === 'leaves' || pattern === 'ghost' || pattern === 'horsetail';
+      || pattern === 'leaves' || pattern === 'ghost' || pattern === 'horsetail'
+      || SELF_TEXTURED.has(pattern);
     if (!selfTwinkling && size >= 0.4) {
       spawnSphere(Math.round((140 + 300 * size) * grandCount), wideGrandSpeed(9 + 11 * size), {
         life: (2.3 + size * 0.9) * grandLife, drag: slowGrandDrag(0.75), gravity: 0.32,
@@ -2636,6 +3644,32 @@ export class FireworksSystem {
           L.position.copy(hub);
           L.color.copy(c);
           L.intensity = 4.5 * power * (0.7 + Math.random() * 0.6);
+        }
+      } else if (e.kind === 'flare') {
+        // a parachute flare descending: chase the precomputed sway path
+        // (burst 'flare' laid it down leg by leg) with one of the pooled
+        // emitter lights, so the flare genuinely sweeps light and shadow
+        // across the dunes as it sways. If both slots are busy fountains it
+        // simply runs unlit — the particle itself carries the brilliance.
+        if (e.age >= e.duration) {
+          this._releaseEmitterLight(e.lightSlot);
+          e.lightSlot = null;
+          this.emitters.splice(i, 1);
+          continue;
+        }
+        let seg = e.path[0];
+        for (let k = 1; k < e.path.length && e.path[k].t0 <= e.age; k++) seg = e.path[k];
+        _v3.set(seg.x, seg.y, seg.z);
+        _v4.set(seg.vx, seg.vy, seg.vz);
+        ballistic(_v3, _v4, e.age - seg.t0, e.g, e.d, _v3);
+        if (!e.lightSlot) e.lightSlot = this._acquireEmitterLight(e);
+        if (e.lightSlot) {
+          const L = e.lightSlot.light;
+          L.position.copy(_v3);
+          L.color.copy(e.color);
+          // snap alight, gutter out over the last stretch, waver in between
+          const env = Math.min(1, e.age / 0.4) * Math.min(1, (e.duration - e.age) / 1.5);
+          L.intensity = e.intensity * env * (0.8 + Math.random() * 0.4);
         }
       }
     }

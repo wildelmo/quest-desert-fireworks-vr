@@ -1,10 +1,18 @@
-// The detonator finale: a choreographed two-minute pyromusical (minus the
-// music — the desert supplies the silence between waves). Plunging the TNT
-// box sends a spark racing down the wire to a battery of mortar pads out in
-// the dunes, then runs a scripted program: opening salvo, color chases, a
-// hushed golden interlude, the niagara waterfall curtains (long-burning
-// horsetail shells fired in a line so their striated trails pour down the
-// sky in sheets), an escalation, and a barrage finale with salutes.
+// The detonator finale, re-choreographed to Victoria Harbour scale: a
+// ~150-second six-scene program fired as VOLLEYS, never polite singles.
+// Plunging the TNT box sends a spark racing down the wire to a battery of
+// nine mortar pads in the dunes plus a nearer five-pad "pontoon" row for
+// mines and fan work. The grammar is the real thing's: all-pad hits,
+// galloping ripple chases, woven fan crisscrosses, three altitude bands
+// stacked at the peaks, one hushed lyrical scene with a lone giant shell
+// and the niagara waterfall curtains, a silence-then-GOLD-WALL payoff, and
+// a three-stage salute-capped finale that cuts hard to black.
+//
+// Build discipline: every launched effect registers a cue first, so the
+// builder can count launch events per second and run the deterministic
+// sound-budget demotion (big→med→small→null on overflow, anchors and
+// salute chains untouched) before the event list is frozen. All "volume"
+// comes from firing more and bigger reports through the LOCKED samples.
 
 import * as THREE from 'three';
 import { randRange, randPick, clamp } from './utils.js';
@@ -14,6 +22,30 @@ const WATERFALL_PALETTE = { name: 'molten silver', a: 0xfff3d8, b: 0xffd489 };
 const GOLD = { name: 'pure gold', a: 0xffc04d, b: 0xfff2bb };
 const PAL = (name) => PALETTES.find((p) => p.name === name) ?? randPick(PALETTES);
 const _sparkPos = new THREE.Vector3();
+const _padFlash = new THREE.Vector3();
+
+// Three altitude bands, tuned so breaks land ~25-45 m (low — still above
+// the dune line from camp, even off the near row), ~60-90 m (mid) and
+// ~110-150 m (high). Layered simultaneous fire = the HK barge look.
+const LAYERS = {
+  low: { speed: [22, 30], flightT: [1.2, 1.6] },
+  mid: { speed: [40, 48], flightT: [2.2, 2.6] },
+  high: { speed: [58, 70], flightT: [3.2, 3.8] },
+};
+
+// pad groupings for the rhythm devices
+const ALL9 = [0, 1, 2, 3, 4, 5, 6, 7, 8];
+const EVENS = [0, 2, 4, 6, 8];
+const ODDS = [1, 3, 5, 7];
+const L2R = ALL9;
+const R2L = [8, 7, 6, 5, 4, 3, 2, 1, 0];
+const OUTSIDE_IN = [0, 8, 1, 7, 2, 6, 3, 5, 4];
+const LOW = [9, 10, 11, 12, 13];
+
+// one-shot sample plays allowed per second, sustained (lifts + reports);
+// brief peaks above this are reserved for the salute chains and the wall
+const SOUND_CAP = 15;
+const SOUND_RANK = { big: 3, med: 2, small: 1 };
 
 export class FinaleShow {
   constructor(fireworks, audio, terrainHeight) {
@@ -27,6 +59,9 @@ export class FinaleShow {
     this.sparkRun = null;   // the zap racing down the wire
     this.curtains = [];     // live waterfall sizzle loops
     this.onEnd = null;
+    this._cues = [];        // launch cues (built, budgeted, then frozen)
+    this.cues = [];         // frozen copy the QA harness reads
+    this.soundBudget = null;
 
     // mortar battery: an arc of pads out in the dunes north of camp,
     // 60-90 m from the campsite so the breaks fill the sky, not the lap
@@ -36,42 +71,338 @@ export class FinaleShow {
       const z = -72 - Math.abs(i - 4) * 2.5 + randRange(-6, 6);
       this.pads.push(new THREE.Vector3(x, terrainHeight(x, z), z));
     }
+    // the pontoon row (pads 9-13): five nearer pads for mines and fan
+    // comets — the low band that keeps the space under the shells alive.
+    // (The detonator wire still lands on pads[4]; 0-8 are untouched.)
+    for (let i = 0; i < 5; i++) {
+      const x = 6 - 30 + i * 15 + randRange(-2, 2);
+      const z = -48 - Math.abs(i - 2) * 2 + randRange(-1.5, 1.5);
+      this.pads.push(new THREE.Vector3(x, terrainHeight(x, z), z));
+    }
   }
 
-  /** Fire one shell from pad index `p` (with lateral fuzz). */
+  // ---- firing primitives -------------------------------------------------
+
+  /** Fire one shell from pad index `p` through the engine's mortar (plays
+   *  its own lift). Used for feature shells that want engine-side extras
+   *  like the tremalon glitter tail; unknown opts pass through harmlessly. */
   _shell(p, pattern, size, opts = {}) {
     const pad = this.pads[clamp(p, 0, this.pads.length - 1)];
     this.fw.mortarShot(pad, {
       pattern, size,
       palette: opts.palette ?? randPick(PALETTES),
-      sound: opts.sound, // mortarShot picks the report class from size
+      sound: opts.sound, // may be null after demotion — respected downstream
       speed: opts.speed ?? (43 + size * 12) * randRange(0.95, 1.05),
       flightT: opts.flightT ?? randRange(2.4, 2.8) + size * 0.4,
       spread: opts.spread ?? 0.10,
+      dir: opts.dir, tail: opts.tail, burst: opts.burst,
     });
   }
 
   /**
-   * The waterfall moment: a line of horsetail shells timed to break
-   * simultaneously, high and wide, so their trails hang as one curtain.
-   * A positional molten-sizzle loop plays under it while the sheet pours.
+   * Manual mortar: same ballistics as the engine's mortarShot, but the show
+   * keeps control of the lift audio (a volley of nine can't afford nine
+   * thoomps — the sound budget allows two per cue) and of the full burst
+   * spec (pistil hearts, silent fizzle comets for the fans). Reuses the
+   * locked 'lift' sample at position/gain/rate — never edits it.
    */
-  _curtain(padIndices, size, height) {
-    const flightT = 2.6;
-    const speed = height / 1.55; // rough inverse of the drag/gravity arc at t=2.6
-    for (const p of padIndices) {
-      this._shell(p, 'waterfall', size, {
-        palette: WATERFALL_PALETTE, sound: 'small',
-        speed, flightT, spread: 0.03,
+  _mortar(pad, pattern, size, o = {}) {
+    const fw = this.fw;
+    if (typeof fw._fireShot !== 'function') { // engine refactor safety net
+      fw.mortarShot(pad, { pattern, size, ...o });
+      return;
+    }
+    const spread = o.spread ?? 0.09;
+    const dir = o.dir
+      ? _padFlash.copy(o.dir).normalize()
+      : _padFlash.set(randRange(-1, 1) * spread, 1, randRange(-1, 1) * spread).normalize();
+    if (o.lift) {
+      this.audio.play('lift', pad, {
+        gain: 1.2, refDistance: 4, send: 0.45, rate: randRange(0.88, 1.08), delayBySound: true,
+      });
+      fw.flashes.flash(_sparkPos.copy(pad).setY(pad.y + 0.4), 0xffc890, 55, 0.16);
+    }
+    const palette = o.palette ?? randPick(PALETTES);
+    const flightT = o.flightT ?? 2.4;
+    const vel = new THREE.Vector3().copy(dir).multiplyScalar(o.speed ?? 46);
+    fw._fireShot(pad.clone(), vel, new THREE.Color(palette.a), o.comet ?? (size >= 0.9 ? 1.4 : 1.0), {
+      gravity: 0.9, drag: 0.35, flightT,
+      onBurst: (p, v) => {
+        if (o.burst === false) {
+          // fan comet: dies in a spit of dim embers — no pattern, no report
+          const pool = fw.pool, tm = fw.time;
+          pool.spawn(8, (i) => pool.set(i,
+            p.x, p.y, p.z,
+            randRange(-1.5, 1.5), randRange(-0.5, 1.2), randRange(-1.5, 1.5),
+            1.1, 0.8, 0.4, tm, randRange(0.25, 0.55),
+            randRange(0.02, 0.045), 0.6, 1.6, 0));
+          return;
+        }
+        fw.burst(p, {
+          pattern, size, palette, sound: o.sound ?? null,
+          pistil: o.pistil, drift: v?.multiplyScalar(0.5),
+        });
+      },
+    });
+  }
+
+  /** Execute one frozen cue (sound class may have been demoted at build). */
+  _fire(c) {
+    const pad = this.pads[clamp(c.pad, 0, this.pads.length - 1)];
+    const o = c.o;
+    if (c.kind === 'mine') {
+      if (typeof this.fw.mine === 'function') {
+        this.fw.mine(pad, {
+          size: c.size, palette: o.palette, kind: o.mineKind ?? 'color', sound: !!c.lift,
+        });
+      } else {
+        // the engine's mine() hasn't landed yet: a low snap-peony from the
+        // same pad stands in for the column until the real eruption arrives
+        this._mortar(pad, 'peony', 0.3, {
+          palette: o.palette, sound: c.sound, lift: c.lift, speed: 26, flightT: 1.05, spread: 0.05,
+        });
+      }
+      return;
+    }
+    if (o.engine) {
+      this._shell(c.pad, c.pattern, c.size, { ...o, sound: c.sound });
+      return;
+    }
+    this._mortar(pad, c.pattern, c.size, {
+      palette: o.palette, sound: c.sound, lift: c.lift, pistil: o.pistil,
+      dir: o.dir, speed: o.speed, flightT: o.flightT, spread: o.spread,
+      burst: o.burst, comet: o.comet,
+    });
+  }
+
+  // ---- cue layer: every launch is registered before it is scheduled -----
+
+  _cue(t, pad, pattern, size, o = {}) {
+    const c = {
+      t, pad, pattern, size, o,
+      kind: o.kind ?? 'shell',
+      lift: (o.engine || o.lift) ? 1 : 0,
+      sound: o.sound ?? null,
+      anchor: !!o.anchor,
+      exempt: pattern === 'salute', // salute chains are the point, and brief
+      tBurst: t + (o.flightT ?? 2.4),
+    };
+    this._cues.push(c);
+    return c;
+  }
+
+  /** VOLLEY — the atomic unit: N effects on one cue, staggered a few
+   *  frames so the cluster blooms as one gesture. Two audible lifts max. */
+  _volley(t, padIdxs, pattern, size, o = {}, stagger = 0.06) {
+    const lifts = o.lifts ?? 2;
+    const L = LAYERS[o.layer ?? 'mid'];
+    padIdxs.forEach((p, k) => {
+      this._cue(t + k * stagger * randRange(0.75, 1.25), p, pattern, size * randRange(0.85, 1.15), {
+        ...o,
+        lift: k < lifts,
+        sound: o.sound !== undefined ? o.sound
+          : (size > 0.75 ? 'big' : size > 0.45 ? 'med' : 'small'),
+        speed: o.speed ?? randRange(L.speed[0], L.speed[1]),
+        flightT: o.flightT ?? randRange(L.flightT[0], L.flightT[1]),
+      });
+    });
+    return padIdxs.length;
+  }
+
+  /** SALVO — the all-pad "hit": everything inside <100 ms. Used 6-10x. */
+  _salvo(t, padIdxs, pattern, size, o = {}) {
+    return this._volley(t, padIdxs, pattern, size, { lifts: o.lifts ?? 3, ...o }, 0.011);
+  }
+
+  /** CHASE — running fire across the arc at a fixed 60-120 ms offset;
+   *  the wave crosses the front in ~0.6-1.1 s. HK's galloping horses. */
+  _chase(t0, gap, order, pattern, size, o = {}) {
+    const L = LAYERS[o.layer ?? 'mid'];
+    order.forEach((p, k) => {
+      this._cue(t0 + k * gap, p, pattern, size * randRange(0.9, 1.1), {
+        ...o,
+        lift: k === 0 || k === order.length - 1,
+        sound: o.sound ?? 'small',
+        speed: o.speed ?? randRange(L.speed[0], L.speed[1]),
+        flightT: o.flightT ?? randRange(L.flightT[0], L.flightT[1]),
+      });
+    });
+    return order.length;
+  }
+
+  /** FAN — n comets in a planar crisscross fan off one pontoon pad,
+   *  burst:false so they draw rising gold ribs and die without a report.
+   *  ~60-90 particles per comet: the cheapest way to keep the low band
+   *  alive. Alternating lean across adjacent pads weaves the lattice. */
+  _fan(t, padIdx, n, spreadDeg, leanDeg, o = {}) {
+    for (let k = 0; k < n; k++) {
+      const a = THREE.MathUtils.degToRad(
+        leanDeg + (n > 1 ? (k / (n - 1) - 0.5) * spreadDeg : 0) + randRange(-1.5, 1.5));
+      const dir = new THREE.Vector3(Math.sin(a), Math.cos(a), randRange(-0.10, 0.02));
+      this._cue(t + k * 0.035, padIdx, 'peony', 0.5, {
+        ...o,
+        dir, burst: false,
+        lift: k === 0 && o.lift !== false,
+        sound: null,
+        speed: o.speed ?? randRange(27, 34),
+        flightT: o.flightT ?? randRange(1.35, 1.75),
+        comet: o.comet ?? 1.0,
       });
     }
-    // the frying-metal hush arrives WITH the break, not the launch — start
-    // the loop after the shells' flight time, fading in as the sheet blooms
-    // and holding as long as the long-burn stars actually pour (~9 s)
-    const mid = this.pads[padIndices[(padIndices.length / 2) | 0]];
-    const pos = new THREE.Vector3(mid.x, height * 0.6, mid.z);
-    this.curtains.push({ pos, delay: flightT, t: 0, dur: 9, sink: 3.5, handle: null });
+    return n;
   }
+
+  /** MINE FRONT — ground eruptions across the pontoon row. */
+  _mineFront(t, padIdxs, o = {}) {
+    const lifts = o.lifts ?? 2;
+    padIdxs.forEach((p, k) => {
+      this._cue(t + k * 0.05 * randRange(0.6, 1.4), p, 'mine', (o.size ?? 1.0) * randRange(0.85, 1.1), {
+        ...o, kind: 'mine', lift: k < lifts, sound: null, flightT: 0.9,
+      });
+    });
+    return padIdxs.length;
+  }
+
+  /**
+   * The waterfall moment (kept — and featured): a line of horsetail shells
+   * timed to break simultaneously, high and wide, so their trails hang as
+   * one curtain, with the positional molten-sizzle loop riding the sheet.
+   */
+  _curtainCue(t, padIndices, size, height) {
+    const flightT = 2.6;
+    const speed = height / 1.55; // rough inverse of the drag/gravity arc at t=2.6
+    padIndices.forEach((p, k) => {
+      // anchor: the CEO's moment keeps its hush intact — demotion hands off
+      this._cue(t + k * 0.02, p, 'waterfall', size, {
+        palette: WATERFALL_PALETTE, sound: 'small', anchor: true, lift: k < 2,
+        speed, flightT, spread: 0.03,
+      });
+    });
+    // the frying-metal hush arrives WITH the break, not the launch
+    this.events.push({
+      t, fn: () => {
+        const mid = this.pads[padIndices[(padIndices.length / 2) | 0]];
+        const pos = new THREE.Vector3(mid.x, height * 0.6, mid.z);
+        this.curtains.push({ pos, delay: flightT, t: 0, dur: 9, sink: 3.5, handle: null });
+      },
+    });
+  }
+
+  /**
+   * THE SUPER WALL (handover 2017): after the silence, every pad fires
+   * inside ~150 ms and keeps firing for ~12 s — mines instant at ground,
+   * low peonies and spiders as the body, woven fans underneath, brocade
+   * crowns staggered on top. Sky reads solid gold, no black gaps.
+   *
+   * Budget arithmetic (per second, steady state): ~4 small peony (0.45 ≈
+   * 2.4k) + 2 spider (0.85 ≈ 0.7k) + 10 fan comets (~60 ea ≈ 0.6k) + 1
+   * mine (~0.5k) + 0.67 brocade/chrys anchor (0.65 ≈ 4.2k → 2.8k/s) ≈
+   * 15k spawned/s; average lives 2.6-5.5 s → ~46k concurrent. Well inside
+   * the 96k ring even with the finale crowns still to come.
+   */
+  _wall(t0) {
+    let n = 0;
+    // the instant: five ground mines + a rolling fireball right off the
+    // silence, then nine low breaks landing as one sheet 1.4 s later
+    n += this._mineFront(t0 + 0.06, LOW, { palette: GOLD, size: 1.05, lifts: 3 });
+    this._cue(t0 + 0.2, 11, 'lampare', 1.0, {
+      palette: GOLD, sound: 'big', anchor: true, lift: true, speed: 24, flightT: 1.25,
+    }); n++;
+    n += this._salvo(t0 + 0.1, EVENS, 'peony', 0.52, { palette: GOLD, sound: 'med', layer: 'low' });
+    n += this._salvo(t0 + 0.16, ODDS, 'spider', 0.9, { palette: GOLD, sound: 'med', layer: 'low' });
+    // then the sustained roar: three layers cycling for twelve seconds
+    const end = t0 + 12.2;
+    let t = t0 + 0.9;
+    let beat = 0;
+    while (t < end) {
+      // mid band: rotating trio volleys, spiders every third beat (cheap
+      // and huge — they do the "no black gaps" work)
+      const base = (beat * 3) % 9;
+      const trio = [base, (base + 3) % 9, (base + 6) % 9];
+      const spider = beat % 3 === 2;
+      n += this._volley(t, trio, spider ? 'spider' : 'peony', spider ? 0.85 : 0.45, {
+        palette: GOLD, sound: 'med', layer: beat % 2 ? 'mid' : 'low', lifts: 1,
+      }, 0.05);
+      // low band: woven fans off both wings, alternating lean; mines on
+      // the off-beats
+      if (beat % 2 === 0) {
+        const wing = ((beat / 2) | 0) % 5;
+        n += this._fan(t + 0.22, 9 + wing, 5, 48, wing % 2 ? 15 : -15, { palette: GOLD });
+        n += this._fan(t + 0.30, 9 + ((wing + 2) % 5), 5, 48, wing % 2 ? -15 : 15, { palette: GOLD });
+      } else {
+        n += this._mineFront(t + 0.25, [9 + (beat % 5)], { palette: GOLD, size: 0.9, lifts: 1 });
+      }
+      // high band: one brocade-class crown every third beat, walking the
+      // arc — the sparse anchors the budget allows (≤2 alive at once)
+      if (beat % 3 === 0) {
+        this._cue(t + 0.1, [2, 6, 4, 0, 8][((beat / 3) | 0) % 5], beat % 6 === 0 ? 'brocade' : 'chrys', 0.65, {
+          palette: GOLD, sound: 'big', anchor: true, lift: true,
+          speed: randRange(58, 64), flightT: randRange(3.2, 3.5),
+        }); n++;
+      }
+      beat++;
+      t += randRange(0.46, 0.55);
+    }
+    return n;
+  }
+
+  // ---- build-time sound budget ------------------------------------------
+
+  /**
+   * Deterministic demotion: bucket every one-shot play (lift at launch,
+   * report at break) per second of the program; where a bucket overflows
+   * the cap, demote the quietest non-anchor report one class at a time
+   * (big→med→small→null) until it fits. Salute chains are exempt — their
+   * seconds are the sanctioned brief peaks. The roar comes from overlap
+   * of the locked samples, never from clipping the audio graph.
+   */
+  _applySoundBudget() {
+    const buckets = new Map();
+    const get = (s) => {
+      let b = buckets.get(s);
+      if (!b) { b = { lifts: 0, booms: [] }; buckets.set(s, b); }
+      return b;
+    };
+    for (const c of this._cues) {
+      if (c.lift) get(Math.floor(c.t)).lifts++;
+      if (c.sound) get(Math.floor(c.tBurst)).booms.push(c);
+    }
+    let demoted = 0;
+    for (const [, b] of buckets) {
+      // count-reducing demotion of the overflow
+      let total = b.lifts + b.booms.length;
+      let guard = 200;
+      while (total > SOUND_CAP && guard-- > 0) {
+        let pick = null;
+        for (const c of b.booms) {
+          if (c.anchor || c.exempt || !c.sound) continue;
+          if (!pick || SOUND_RANK[c.sound] < SOUND_RANK[pick.sound]
+            || (SOUND_RANK[c.sound] === SOUND_RANK[pick.sound] && c.size < pick.size)) pick = c;
+        }
+        if (!pick) break; // only anchors/salutes left — sanctioned peak
+        if (pick.sound === 'small') { pick.sound = null; total--; }
+        else pick.sound = pick.sound === 'big' ? 'med' : 'small';
+        demoted++;
+      }
+      // and never stack more than 5 big reports into one second — the
+      // extra bigs step down to med (anchors keep their class)
+      let bigs = b.booms.filter((c) => c.sound === 'big' && !c.anchor && !c.exempt);
+      while (b.booms.filter((c) => c.sound === 'big').length > 5 && bigs.length) {
+        bigs.sort((a, x) => a.size - x.size);
+        bigs.shift().sound = 'med';
+        bigs = b.booms.filter((c) => c.sound === 'big' && !c.anchor && !c.exempt);
+        demoted++;
+      }
+    }
+    // report the post-demotion profile for the QA harness
+    let maxPlays = 0;
+    for (const [, b] of buckets) {
+      maxPlays = Math.max(maxPlays, b.lifts + b.booms.filter((c) => c.sound).length);
+    }
+    this.soundBudget = { cap: SOUND_CAP, demoted, maxPlaysPerSec: maxPlays };
+  }
+
+  // ---- the program -------------------------------------------------------
 
   /** Build and start the full program. wireCurve carries the opening zap. */
   start(wireCurve) {
@@ -80,8 +411,8 @@ export class FinaleShow {
     this.time = 0;
     this.events = [];
     this._ei = 0;
+    this._cues = [];
     const at = (t, fn) => this.events.push({ t, fn });
-    const shell = (t, p, pattern, size, opts) => at(t, () => this._shell(p, pattern, size, opts));
 
     // --- 0-2.6s: the zap races down the wire to the battery ---
     this.sparkRun = {
@@ -90,97 +421,295 @@ export class FinaleShow {
         gain: 0.9, loop: true, refDistance: 1.2, send: 0.15, rate: 1.7, hrtf: true,
       }),
     };
+    const T = (s) => 2.7 + s; // program clock: scene seconds → show seconds
 
-    // --- 3-17s: opening — one grand kamuro crown, then the sky fills ---
-    shell(2.7, 4, 'kamuro', 1.8, { palette: GOLD, flightT: 3.3, speed: 62 });
-    shell(6.3, 2, 'peony', 1.1);
-    shell(6.9, 6, 'peony', 1.1);
-    for (let i = 0; i < 10; i++) {
-      shell(8.5 + i * 0.85, (i * 3 + 1) % 9, randPick(['peony', 'dahlia', 'ring', 'chrys', 'saturn']), randRange(0.8, 1.2));
+    // ================= SCENE 1 — "GOLDEN HERD" (0-15) =================
+    // HK CNY 2026 opening: full width and full altitude inside the first
+    // seconds — three all-pad hits at t=0/4/8 with the galloping-horse
+    // horsetail ripples (80 ms offsets) charging between them, each pass
+    // a size louder. Crimson shells over pure gold.
+    const CRIMSON = PAL('crimson gold');
+    {
+      // hit 1: nine mid-band crimson peonies inside 100 ms under one grand
+      // gold crown. ~9 × 2.9k stars in the break second — the largest
+      // single spend outside the finale, on purpose: HK opens at FULL power.
+      this._salvo(T(0), ALL9, 'peony', 0.6, { palette: CRIMSON, layer: 'mid', sound: 'med' });
+      this._cue(T(0.08), 4, 'kamuro', 1.5, {
+        palette: GOLD, sound: 'big', anchor: true, engine: true, tail: 'glitter',
+        speed: 62, flightT: 3.4,
+      });
+      // herd pass 1: gold horsetails L→R (cheap shells, ~0.9k each)
+      this._chase(T(1.7), 0.08, L2R, 'horsetail', 0.45, { palette: GOLD, sound: 'small' });
+      // hit 2: crimson again — and the pontoon row wakes up underneath
+      this._salvo(T(4), ALL9, 'peony', 0.62, { palette: CRIMSON, layer: 'mid', sound: 'med' });
+      this._mineFront(T(4.12), LOW, { palette: GOLD, size: 0.9 });
+      // herd pass 2: back R→L, a size up
+      this._chase(T(5.7), 0.08, R2L, 'horsetail', 0.55, { palette: GOLD, sound: 'small' });
+      // hit 3: the full stack — mid crimson, low fans weaving, two high
+      // dahlia anchors on the shoulders
+      this._salvo(T(8), ALL9, 'peony', 0.66, { palette: CRIMSON, layer: 'mid', sound: 'med' });
+      this._fan(T(8.15), 10, 5, 52, -15, { palette: GOLD });
+      this._fan(T(8.22), 12, 5, 52, 15, { palette: GOLD });
+      this._cue(T(8.45), 2, 'dahlia', 1.15, {
+        palette: CRIMSON, sound: 'big', anchor: true, engine: true, speed: 60, flightT: 3.3,
+      });
+      this._cue(T(8.6), 6, 'dahlia', 1.15, {
+        palette: CRIMSON, sound: 'big', anchor: true, engine: true, speed: 60, flightT: 3.3,
+      });
+      // herd pass 3: outside-in pincer, the loudest
+      this._chase(T(9.8), 0.07, OUTSIDE_IN, 'horsetail', 0.6, { palette: GOLD, sound: 'med' });
+      // close the statement: a crossette pair and one spider stretched
+      // across the whole arc (few stars, huge streaks — basically free)
+      this._volley(T(12.4), [3, 5], 'crossette', 1.0, { palette: CRIMSON, sound: 'med' }, 0.25);
+      this._cue(T(13.6), 4, 'spider', 1.3, {
+        palette: GOLD, sound: 'med', lift: true, speed: 52, flightT: 2.9,
+      });
     }
 
-    // --- 18-33s: color chases, left to right and back — the return chase
-    // is all ghost shells, so the whole line changes color in mid-air ---
-    const palA = randPick(PALETTES), palB = randPick(PALETTES);
-    for (let i = 0; i < 9; i++) {
-      shell(18 + i * 0.42, i, i % 2 ? 'ring' : 'peony', 0.75, { palette: i % 2 ? palB : palA });
-    }
-    for (let i = 0; i < 9; i++) {
-      shell(23.5 + i * 0.42, 8 - i, 'ghost', 0.75, { palette: i % 2 ? palA : palB });
-    }
-    shell(28.5, 4, 'crossette', 1.3);
-    shell(30.2, 1, 'crossette', 1.0);
-    shell(30.9, 7, 'crossette', 1.0);
-
-    // --- 34-45s: variety wave — serpents, palms, strobes, a Saturn ---
-    shell(34, 3, 'serpents', 1.2);
-    shell(35.6, 5, 'palm', 1.3);
-    shell(37.4, 1, 'strobe', 1.1);
-    shell(38.9, 7, 'saturn', 1.3);
-    shell(40.6, 4, 'serpents', 1.35);
-    shell(42.4, 2, 'strobe', 1.0);
-    shell(43.2, 6, 'chrys', 1.2);
-
-    // --- 46-53s: the hush — slow golden willows over drifting horsetails,
-    // and one eerie falling-leaves shell blinking between colors ---
-    shell(46.5, 2, 'willow', 1.6, { palette: GOLD, flightT: 3.2, speed: 58 });
-    shell(48.2, 4, 'horsetail', 1.2, { palette: GOLD, flightT: 2.8, speed: 50 });
-    shell(49.5, 6, 'willow', 1.6, { palette: GOLD, flightT: 3.2, speed: 58 });
-    shell(51.5, 4, 'leaves', 1.1, { flightT: 3.0, speed: 54 });
-
-    // --- 54-70s: THE WATERFALL — twin curtains pouring down the sky ---
-    at(54, () => this._curtain([0, 2, 4, 6, 8], 1.35, 62));
-    at(59.5, () => this._curtain([1, 3, 5, 7], 1.1, 52));
-    // lone horsetails keep the sheet fed as it thins
-    shell(65, 2, 'waterfall', 0.8, { palette: WATERFALL_PALETTE, sound: 'small', flightT: 2.3, speed: 36, spread: 0.04 });
-    shell(66.5, 6, 'waterfall', 0.8, { palette: WATERFALL_PALETTE, sound: 'small', flightT: 2.3, speed: 36, spread: 0.04 });
-
-    // --- 71-90s: second build — multibreaks, then the postcard tableau:
-    // the reference-photo sky, scarlet and teal dahlias flanking one huge
-    // golden chrysanthemum, violet off the right shoulder ---
-    shell(71.5, 4, 'timerain', 1.5, { palette: GOLD });
-    shell(73.4, 1, 'multibreak', 1.2);
-    shell(75.6, 7, 'multibreak', 1.2);
-    shell(78, 1, 'dahlia', 1.15, { palette: PAL('scarlet pink') });
-    shell(78.55, 3, 'dahlia', 1.2, { palette: PAL('teal ember') });
-    shell(79.1, 4, 'chrys', 1.75, { palette: PAL('golden brocade'), flightT: 3.1, speed: 58 });
-    shell(79.8, 7, 'dahlia', 1.05, { palette: PAL('royal violet') });
-    shell(80.5, 8, 'dahlia', 1.0, { palette: PAL('scarlet pink') });
-    shell(81.4, 0, 'dahlia', 1.0, { palette: PAL('oasis teal') });
-    shell(83.5, 4, 'salute', 0.9, { sound: 'big' });
-    shell(85, 2, 'palm', 1.4);
-    shell(86.5, 6, 'chrys', 1.4);
-    shell(88.5, 4, 'multibreak', 1.5);
-
-    // --- 91-104s: escalation — volleys tightening ---
-    let t = 91;
-    let gap = 1.25;
-    while (t < 104) {
-      const p = (Math.random() * 9) | 0;
-      shell(t, p, randPick(['peony', 'dahlia', 'ring', 'chrys', 'palm', 'brocade', 'ghost', 'saturn']), randRange(1.0, 1.4));
-      if (Math.random() < 0.3) shell(t + 0.18, (p + 4) % 9, 'salute', 0.8, { sound: 'big' });
-      t += gap;
-      gap = Math.max(0.55, gap * 0.93);
+    // ================= SCENE 2 — "CRIMSON TIDE" (15-45) =================
+    // The spectacle scene: pistil-heart peony volleys pulsing on a ~2 s
+    // bar that is never quite metronomic, woven fan sweeps filling the
+    // off-beats from the pontoon row, one big glitter-tail anchor every
+    // ~8 s. Palette holds crimson/gold, then shifts scarlet/pink at the
+    // half — scene changes swap color AND rhythm together.
+    {
+      const SCARLET = PAL('scarlet pink');
+      let bar = T(15.6), k = 0;
+      while (bar < T(43.5)) {
+        const pal = bar < T(30) ? CRIMSON : SCARLET;
+        const group = k % 2 ? ODDS : EVENS;
+        this._volley(bar, group, 'peony', randRange(0.5, 0.62), {
+          palette: pal, layer: 'mid', sound: 'med',
+          pistil: { color: pal.b, ratio: 0.38 },
+        }, 0.055);
+        if (k % 2 === 0) {
+          // the woven crisscross: adjacent pontoon pads lean opposite ways
+          const lowPad = 9 + ((k / 2) | 0) % 5;
+          this._fan(bar + randRange(0.9, 1.15), lowPad, 5, 52, k % 4 === 0 ? -16 : 16, { palette: pal });
+        }
+        if (k % 5 === 3) this._mineFront(bar + 0.5, [9 + (k % 5)], { palette: pal, size: 0.8, lifts: 1 });
+        k++;
+        bar += randRange(1.85, 2.35); // on the beat, never on a grid
+      }
+      // sparse anchors: big ray shells with tremalon rise, one at a time
+      this._cue(T(19.6), 2, 'chrys', 1.3, {
+        palette: CRIMSON, sound: 'big', anchor: true, engine: true, tail: 'glitter', speed: 60, flightT: 3.3,
+      });
+      this._cue(T(27.2), 6, 'dahlia', 1.35, {
+        palette: CRIMSON, sound: 'big', anchor: true, engine: true, tail: 'glitter', speed: 61, flightT: 3.4,
+      });
+      this._cue(T(35.1), 3, 'chrys', 1.3, {
+        palette: SCARLET, sound: 'big', anchor: true, engine: true, tail: 'glitter', speed: 60, flightT: 3.3,
+      });
+      this._cue(T(42.6), 5, 'dahlia', 1.4, {
+        palette: SCARLET, sound: 'big', anchor: true, engine: true, tail: 'glitter', speed: 62, flightT: 3.4,
+      });
+      // two all-pad hits keep the scene honest
+      this._salvo(T(22.8), ALL9, 'ring', 0.55, { palette: CRIMSON, layer: 'mid', sound: 'med' });
+      this._salvo(T(37.4), ALL9, 'peony', 0.6, { palette: SCARLET, layer: 'mid', sound: 'med' });
+      // one rolling fireball low over the dunes to close the tide
+      this._cue(T(40.9), 11, 'lampare', 1.0, {
+        palette: CRIMSON, sound: 'big', anchor: true, lift: true, speed: 24, flightT: 1.3,
+      });
     }
 
-    // --- 105-122s: FINALE — the sky wall ---
-    t = 105;
-    while (t < 117.5) {
-      shell(t, (Math.random() * 9) | 0,
-        randPick(['peony', 'dahlia', 'palm', 'brocade', 'chrys', 'multibreak', 'crackle', 'kamuro', 'ghost']),
-        randRange(1.2, 1.7));
-      t += randRange(0.3, 0.55);
+    // ================ SCENE 3 — "LANTERN GARDEN" (45-70) ================
+    // The novelty scene (HK since 2018): shaped shells mid-altitude in
+    // matched pairs and trios with real breathing room between gestures.
+    // Pastel rotation — violet, teal, blue-gold — and every 2D shell plane
+    // faces the campsite: the free upgrade over the real harbour.
+    {
+      const VIOLET = PAL('royal violet');
+      const TEAL = PAL('oasis teal');
+      const BLUEGOLD = PAL('blue gold');
+      // palette pivot: a ghost-shell chase — the whole line changes color
+      // in mid-air, announcing the new scene's family
+      this._chase(T(45.2), 0.11, L2R, 'ghost', 0.55, { palette: VIOLET, sound: 'small' });
+      // smiley trio beaming at camp
+      this._volley(T(48.6), [2, 4, 6], 'smiley', 1.0, { palette: VIOLET, sound: 'med', lifts: 3 }, 0.12);
+      this._mineFront(T(50.4), [11], { palette: VIOLET, size: 0.7, lifts: 1 });
+      // hydrangea I: pistil rings in changing colors (NatDay 2023 scene 5)
+      this._volley(T(51.5), EVENS, 'ring', 0.7, {
+        palette: TEAL, sound: 'small', pistil: { ratio: 0.4 },
+      }, 0.08);
+      // twin hearts toward camp, then a smaller echo pair
+      this._volley(T(54.8), [3, 5], 'heart', 1.05, { palette: PAL('scarlet pink'), sound: 'med', lifts: 2 }, 0.1);
+      this._volley(T(56.4), [2, 6], 'heart', 0.8, { palette: PAL('scarlet pink'), sound: 'small', lifts: 1 }, 0.1);
+      this._volley(T(57.7), [0, 8], 'peony', 0.45, { palette: VIOLET, sound: 'small' }, 0.15);
+      // silver corkscrews and butterflies — the silent novelties
+      this._volley(T(58.6), [1, 7], 'tourbillon', 1.0, { palette: PAL('silver'), sound: null }, 0.15);
+      this._volley(T(59.5), [3, 5], 'farfalle', 1.0, { palette: VIOLET, sound: null }, 0.2);
+      // red five-pointed stars: the strongly SHAPED statement, full width
+      this._volley(T(61.7), [2, 4, 6], 'star5', 1.0, { palette: PAL('strontium red'), sound: 'med', lifts: 3 }, 0.12);
+      // a fish shell swims across the gap
+      this._cue(T(63.2), 3, 'fish', 1.0, { palette: TEAL, sound: null, speed: 46, flightT: 2.4, lift: true });
+      // hydrangea II + a saturn pair in blue-gold
+      this._volley(T(64.2), ODDS, 'ring', 0.65, {
+        palette: BLUEGOLD, sound: 'small', pistil: { ratio: 0.4 },
+      }, 0.08);
+      this._volley(T(65.6), [2, 6], 'saturn', 0.9, { palette: BLUEGOLD, sound: 'med' }, 0.3);
+      this._mineFront(T(66.4), [9, 13], { palette: BLUEGOLD, size: 0.7, lifts: 1 });
+      // bees: a frantic little gold swarm under the closing tableau
+      this._cue(T(66.9), 4, 'bees', 1.0, { palette: GOLD, sound: null, speed: 40, flightT: 2.2, lift: true });
+      // the tableau: five shapes alight at once, then breathe out
+      this._cue(T(68.0), 4, 'smiley', 1.05, { palette: VIOLET, sound: 'med', lift: true, speed: 44, flightT: 2.4 });
+      this._volley(T(68.1), [2, 6], 'heart', 0.9, { palette: PAL('scarlet pink'), sound: 'small', lifts: 1 }, 0.06);
+      this._volley(T(68.2), [0, 8], 'star5', 0.9, { palette: PAL('strontium red'), sound: 'small', lifts: 1 }, 0.06);
     }
-    shell(118, 3, 'multibreak', 1.7, { flightT: 3.2, speed: 60 });
-    shell(118.4, 5, 'multibreak', 1.7, { flightT: 3.2, speed: 60 });
-    shell(119, 4, 'kamuro', 2.0, { palette: GOLD, flightT: 3.5, speed: 64 });
-    // closing salute chain — the triple thunderclap that says "that's all"
-    shell(121.6, 2, 'salute', 1.0, { sound: 'big', flightT: 2.2 });
-    shell(122.0, 6, 'salute', 1.0, { sound: 'big', flightT: 2.2 });
-    shell(122.4, 4, 'salute', 1.2, { sound: 'big', flightT: 2.4 });
 
+    // ================= SCENE 4 — "DESERT SEA" (70-90) =================
+    // The lyrical scene, quiet but never empty: parachute flares hanging
+    // over a shimmering mine-front, a strobewillow sea, then the Nagaoka
+    // moment — ONE sanshakudama-class gold kamuro, high and alone — and
+    // the niagara waterfall curtains pouring down the sky. Gold and
+    // silver only. This hush is what makes the finale land.
+    {
+      const SILVER = PAL('silver');
+      // three parachute flares drift for the whole scene
+      this._cue(T(70.3), 4, 'flare', 1.0, { palette: SILVER, sound: null, speed: 60, flightT: 3.3, lift: true });
+      this._mineFront(T(71.6), LOW, { palette: GOLD, size: 0.75, lifts: 1 });
+      // the sea: asynchronous blinking curtains, silver on black
+      this._volley(T(72.9), [3, 5], 'strobewillow', 1.0, { palette: SILVER, sound: 'small', lifts: 2 }, 0.4);
+      // THE BIG ONE: gold kamuro at 2.4, max altitude, nothing else in the
+      // sky for four seconds either side (~17k stars, 8 s hang — the one
+      // place the budget spends like this, because the sky is otherwise dark)
+      this._cue(T(76.5), 4, 'kamuro', 2.4, {
+        palette: GOLD, sound: 'big', anchor: true, engine: true, tail: 'glitter',
+        speed: 66, flightT: 3.7,
+      });
+      // THE WATERFALL — twin curtains, the CEO's moment, kept and fed
+      this._curtainCue(T(81.5), [0, 2, 4, 6, 8], 1.25, 58);
+      this._curtainCue(T(85.2), [1, 3, 5, 7], 0.95, 46);
+      this._cue(T(86.0), 4, 'strobewillow', 0.9, { palette: SILVER, sound: null, speed: 42, flightT: 2.3 });
+      // lone horsetails keep the sheet fed as it thins
+      this._cue(T(87.5), 2, 'waterfall', 0.7, {
+        palette: WATERFALL_PALETTE, sound: 'small', anchor: true, speed: 36, flightT: 2.3, spread: 0.04, lift: true,
+      });
+      this._cue(T(88.4), 6, 'waterfall', 0.7, {
+        palette: WATERFALL_PALETTE, sound: 'small', anchor: true, speed: 36, flightT: 2.3, spread: 0.04, lift: true,
+      });
+    }
+
+    // ================ SCENE 5 — "THE GATHERING" (90-120) ================
+    // The build: ripple chases with the interval shrinking every pass,
+    // altitude layers stacking one by one, novelty textures (bees, fish,
+    // dragon eggs, thousand-bloom) threaded through, and a closing
+    // accelerando that halves the volley interval until it's continuous.
+    // Palette narrows to gold and white.
+    {
+      const BROC = PAL('golden brocade');
+      this._chase(T(90.3), 0.12, L2R, 'brocade', 0.45, { palette: BROC, sound: 'small' });
+      this._chase(T(93.7), 0.10, R2L, 'peony', 0.5, { palette: GOLD, sound: 'small' });
+      this._cue(T(95.2), 3, 'bees', 1.0, { palette: GOLD, sound: null, speed: 42, flightT: 2.3, lift: true });
+      this._cue(T(95.9), 5, 'fish', 1.0, { palette: BROC, sound: null, speed: 44, flightT: 2.4 });
+      this._chase(T(96.7), 0.09, OUTSIDE_IN, 'peony', 0.5, { palette: GOLD, sound: 'small' });
+      // second layer joins: fans weaving under the chases
+      this._fan(T(96.9), 10, 5, 48, -14, { palette: GOLD });
+      this._fan(T(97.0), 12, 5, 48, 14, { palette: GOLD });
+      // all-pad hit + mines
+      this._salvo(T(99.4), ALL9, 'peony', 0.55, { palette: GOLD, layer: 'mid', sound: 'med' });
+      this._mineFront(T(99.5), [10, 12], { palette: GOLD, size: 0.9, lifts: 1 });
+      // spiders: gold lightning across the whole arc, almost free
+      this._chase(T(100.9), 0.08, L2R, 'spider', 0.85, { palette: GOLD, sound: 'small' });
+      // dragon eggs crackle texture
+      this._cue(T(102.5), 2, 'dragoneggs', 1.0, { palette: BROC, sound: null, speed: 44, flightT: 2.3, lift: true });
+      this._cue(T(103.2), 6, 'dragoneggs', 1.0, { palette: BROC, sound: null, speed: 44, flightT: 2.3 });
+      this._chase(T(104.0), 0.075, R2L, 'peony', 0.55, { palette: GOLD, sound: 'small' });
+      // thousand-bloom: dim ember cloud, then every ember pops at once —
+      // fired into a held gap so the synchronized pop owns the sky
+      this._cue(T(106.6), 4, 'thousandbloom', 1.1, {
+        palette: BROC, sound: 'med', anchor: true, lift: true, speed: 56, flightT: 3.0,
+      });
+      this._chase(T(108.5), 0.07, OUTSIDE_IN, 'brocade', 0.5, { palette: BROC, sound: 'small' });
+      // all-pad hit + the first pre-finale thunderclap
+      this._salvo(T(110.7), ALL9, 'peony', 0.6, { palette: GOLD, layer: 'mid', sound: 'med' });
+      this._cue(T(110.9), 4, 'salute', 0.7, { sound: 'big', lift: true, speed: 44, flightT: 2.1 });
+      this._volley(T(112.1), [2, 6], 'thousandbloom', 1.0, { palette: BROC, sound: 'med', lifts: 2 }, 0.15);
+      // accelerando: trio volleys, interval 1.5 → 0.28 s — the herd breaks
+      // into a stampede and hands off to the finale at full gallop
+      let t = T(113.5), gap = 1.5, w = 0;
+      while (t < T(119.7)) {
+        const base = (w * 4) % 9;
+        this._volley(t, [base, (base + 3) % 9, (base + 6) % 9], 'peony', 0.5, {
+          palette: w % 2 ? GOLD : BROC, layer: w % 3 === 2 ? 'low' : 'mid', sound: 'small', lifts: 1,
+        }, 0.04);
+        if (w % 2 === 1) this._fan(t + 0.15, 9 + w % 5, 4, 42, w % 4 === 1 ? 13 : -13, { palette: GOLD });
+        t += gap;
+        gap = Math.max(0.28, gap * 0.72);
+        w++;
+      }
+      this._cue(T(115.9), 3, 'salute', 0.7, { sound: 'big', lift: true, speed: 44, flightT: 2.1 });
+      this._cue(T(118.3), 5, 'salute', 0.75, { sound: 'big', lift: true, speed: 44, flightT: 2.1 });
+    }
+
+    // ============ SCENE 6 — "SUNRISE AT MIDNIGHT" (120-150) ============
+    // Finale, three stages per the harbour anatomy: ripple build → 2.5 s
+    // of genuine dead air → the SUPER GOLD WALL for twelve seconds → a
+    // thirty-salute terminal ripple over three giant crowns → hard cut.
+    // ~45% of the show's launch events live in these thirty seconds.
+    {
+      const BROC = PAL('golden brocade');
+      // Stage 1 (120-126.8): continuous ripple barrages, interval 0.58 →
+      // 0.28 s. Long-lived brocade only early — the last three seconds are
+      // short-lived peony/spider so the sky can actually go dark for the
+      // silence beat.
+      let t = T(120.0), gap = 0.58, w = 0;
+      while (t < T(126.8)) {
+        const base = (w * 2) % 9;
+        const late = t > T(124);
+        const pat = w % 4 === 3 ? 'spider' : (!late && w % 2 ? 'brocade' : 'peony');
+        this._volley(t, [base, (base + 4) % 9, (base + 7) % 9], pat, pat === 'spider' ? 0.8 : 0.5, {
+          palette: w % 2 ? GOLD : BROC, layer: w % 3 === 0 ? 'low' : 'mid', sound: 'small', lifts: 1,
+        }, 0.04);
+        if (w % 3 === 0) {
+          this._fan(t + 0.15, 9 + ((w / 3) | 0) % 5, 4, 40, ((w / 3) | 0) % 2 ? 12 : -12, { palette: GOLD });
+        }
+        t += gap;
+        gap = Math.max(0.28, gap * 0.90);
+        w++;
+      }
+      // SILENCE (126.8-131.7): nothing. The last break fades ~129.3 and
+      // the desert gets 2.5 s of real dark — the wall lands because of it.
+      // (The 14 lift thumps at 131.7 firing in the dark are the tease.)
+      this._wall(T(131.7));
+      // Stage 3 (144-148): the terminal salvo — three giant crowns to max
+      // altitude, then thirty salutes rippling L→R→L→outside-in across
+      // the arc OVER the wall's afterglow, sizes ramping. Salute chain is
+      // exempt from demotion: it IS the point. Crowns bloom mid-chain.
+      const t3 = T(144.0);
+      this._cue(t3 + 0.10, 4, 'kamuro', 2.0, {
+        palette: GOLD, sound: 'big', anchor: true, engine: true, tail: 'glitter', speed: 66, flightT: 3.6,
+      });
+      this._cue(t3 + 0.16, 1, 'dahlia', 1.45, {
+        palette: BROC, sound: 'big', anchor: true, engine: true, speed: 63, flightT: 3.5,
+      });
+      this._cue(t3 + 0.22, 7, 'dahlia', 1.45, {
+        palette: BROC, sound: 'big', anchor: true, engine: true, speed: 63, flightT: 3.5,
+      });
+      const ripple = [...L2R, ...R2L, ...OUTSIDE_IN];
+      ripple.forEach((p, k) => {
+        this._cue(t3 + 0.35 + k * 0.12, p, 'salute', 0.55 + 0.3 * (k / ripple.length), {
+          palette: PAL('silver'), sound: 'big', lift: k % 2 === 0,
+          speed: randRange(41, 46), flightT: randRange(2.0, 2.3),
+        });
+      });
+      // the last word: a tight center triple, biggest reports of the night
+      [3, 5, 4].forEach((p, k) => {
+        this._cue(t3 + 3.75 + k * 0.15, p, 'salute', 0.95, {
+          palette: PAL('silver'), sound: 'big', lift: true, speed: 45, flightT: 2.3,
+        });
+      });
+      // HARD CUT: last launch ≈ 148.1, last report ≈ 150.4 — then nothing
+      // but glitter fallout and the echo rolling off the dunes. Black.
+    }
+
+    // ---- budget pass + freeze ----
+    this._applySoundBudget();
+    this._cues.sort((a, b) => a.t - b.t);
+    this.cues = this._cues;
+    for (const c of this._cues) at(c.t, () => this._fire(c));
     this.events.sort((a, b) => a.t - b.t);
-    this.duration = 129; // last break + its echo, then the desert gets quiet
+    this.duration = 157; // last break + crown fallout, then the desert gets quiet
     return true;
   }
 

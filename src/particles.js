@@ -283,6 +283,15 @@ export class ParticlePool {
     this.cursor = 0;
     this.dirtyRuns = []; // contiguous [start, count] runs written this frame
 
+    // Ring-overflow debug counter (default OFF — the spawn hot path must
+    // stay branch-cheap). When trackStomp is on, every spawn that lands on
+    // a slot whose particle is still burning (birth+life ahead of the
+    // clock, including precomputed children not yet born) bumps
+    // stompedAlive. The show-budget test flips this on and asserts the
+    // finale doesn't eat a meaningful fraction of its own stars.
+    this.trackStomp = false;
+    this.stompedAlive = 0;
+
     const geo = new THREE.BufferGeometry();
     this.aPos = new THREE.BufferAttribute(new Float32Array(capacity * 3), 3);
     this.aVel = new THREE.BufferAttribute(new Float32Array(capacity * 3), 3);
@@ -358,6 +367,16 @@ export class ParticlePool {
     while (remaining > 0) {
       const start = this.cursor;
       const run = Math.min(remaining, capacity - start);
+      if (this.trackStomp) {
+        // one branch per RUN when off; the per-slot scan only exists in
+        // debug builds of reality (tests), never on the Quest hot path
+        const t = this.aTiming.array;
+        const now = this.uniforms.uTime.value;
+        for (let k = 0; k < run; k++) {
+          const j = (start + k) * 2;
+          if (t[j] + t[j + 1] > now) this.stompedAlive++;
+        }
+      }
       for (let k = 0; k < run; k++) fill(start + k);
       this.cursor = (start + run) % capacity;
       remaining -= run;
