@@ -34,7 +34,10 @@ await page.evaluate(() => {
   app.camera.parent.position.set(0, 0, 14);
   app.camera.fov = 92;
   app.camera.updateProjectionMatrix();
-  app.camera.lookAt(6, 66, -74);
+  // DesktopControls stamps player.yaw / camera.pitch every frame, so a
+  // one-shot lookAt is overwritten — aim through the control state instead
+  app.interactions.desktop.pitch = 0.62;         // ~36 deg up at the battery
+  app.interactions.desktop.yaw = -Math.atan2(6, 88); // center of the arc
   app.world.detonator.autoPlunge();
 });
 
