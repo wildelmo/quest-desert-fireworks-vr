@@ -27,8 +27,14 @@ page.setDefaultTimeout(600000);
 // and start the show
 await page.evaluate(() => {
   const app = window.__app;
-  app.camera.parent.position.set(0, 0, 2);
-  app.camera.lookAt(6, 60, -74);
+  // frame the whole display column: back off to the camp's south edge, open
+  // the FOV wide (a VR viewer just looks up — a fixed 2D frame can't), and
+  // aim above the battery so the high band (breaks to ~150 m at ~75 m out,
+  // >60° elevation) isn't cropped by the frame top
+  app.camera.parent.position.set(0, 0, 14);
+  app.camera.fov = 92;
+  app.camera.updateProjectionMatrix();
+  app.camera.lookAt(6, 66, -74);
   app.world.detonator.autoPlunge();
 });
 
