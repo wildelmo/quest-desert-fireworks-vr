@@ -27,10 +27,13 @@ const _padFlash = new THREE.Vector3();
 // Three altitude bands, tuned so breaks land ~25-45 m (low — still above
 // the dune line from camp, even off the near row), ~60-90 m (mid) and
 // ~110-150 m (high). Layered simultaneous fire = the HK barge look.
+// Break heights tuned against captures from the campsite (88 m out, mesas
+// at ~12 deg): mid must clear ~65 m and high ~100 m or the whole body of
+// the show huddles in a sliver above the mesa line and reads polite again.
 const LAYERS = {
-  low: { speed: [22, 30], flightT: [1.2, 1.6] },
-  mid: { speed: [40, 48], flightT: [2.2, 2.6] },
-  high: { speed: [58, 70], flightT: [3.2, 3.8] },
+  low: { speed: [24, 32], flightT: [1.25, 1.65] },
+  mid: { speed: [46, 54], flightT: [2.4, 2.8] },
+  high: { speed: [64, 74], flightT: [3.4, 4.0] },
 };
 
 // pad groupings for the rhythm devices
@@ -304,8 +307,8 @@ export class FinaleShow {
     this._cue(t0 + 0.2, 11, 'lampare', 1.0, {
       palette: GOLD, sound: 'big', anchor: true, lift: true, speed: 24, flightT: 1.25,
     }); n++;
-    n += this._salvo(t0 + 0.1, EVENS, 'peony', 0.5, { palette: GOLD, sound: 'med', layer: 'low' });
-    n += this._salvo(t0 + 0.16, ODDS, 'spider', 0.85, { palette: GOLD, sound: 'med', layer: 'low' });
+    n += this._salvo(t0 + 0.1, EVENS, 'peony', 0.62, { palette: GOLD, sound: 'med', layer: 'low' });
+    n += this._salvo(t0 + 0.16, ODDS, 'spider', 0.95, { palette: GOLD, sound: 'med', layer: 'low' });
     // then the sustained roar: three layers cycling for twelve seconds
     const end = t0 + 12.2;
     let t = t0 + 0.9;
@@ -319,7 +322,7 @@ export class FinaleShow {
       const base = (beat * 4) % 9;
       const trio = [base, (base + 3) % 9, (base + 6) % 9];
       const spider = beat % 3 === 2;
-      n += this._volley(t, trio, spider ? 'spider' : 'peony', spider ? 0.8 : 0.42, {
+      n += this._volley(t, trio, spider ? 'spider' : beat % 4 === 1 ? 'ghost' : beat % 4 === 3 ? 'crackle' : 'peony', spider ? 0.9 : 0.55, {
         palette: GOLD, sound: 'med', layer: beat % 2 ? 'mid' : 'low', lifts: 1,
       }, 0.05);
       // low band: woven fans off both wings, alternating lean; mines on
@@ -437,7 +440,7 @@ export class FinaleShow {
       // single spend outside the finale, on purpose: HK opens at FULL
       // power. (Dahlia, not kamuro, for the crown: a kamuro's 7 s hang
       // would still be alive when hit 3 lands and tip the 96k ring.)
-      this._salvo(T(0), ALL9, 'peony', 0.52, { palette: CRIMSON, layer: 'mid', sound: 'med' });
+      this._salvo(T(0), ALL9, 'peony', 0.62, { palette: CRIMSON, layer: 'mid', sound: 'med' });
       this._cue(T(0.08), 4, 'dahlia', 1.35, {
         palette: GOLD, sound: 'big', anchor: true, engine: true, tail: 'glitter',
         speed: 62, flightT: 3.4,
@@ -445,13 +448,13 @@ export class FinaleShow {
       // herd pass 1: gold horsetails L→R (cheap shells, ~0.9k each)
       this._chase(T(1.7), 0.08, L2R, 'horsetail', 0.42, { palette: GOLD, sound: 'small' });
       // hit 2: crimson again — and the pontoon row wakes up underneath
-      this._salvo(T(4), ALL9, 'peony', 0.55, { palette: CRIMSON, layer: 'mid', sound: 'med' });
+      this._salvo(T(4), ALL9, 'crackle', 0.68, { palette: CRIMSON, layer: 'mid', sound: 'med' });
       this._mineFront(T(4.12), LOW, { palette: GOLD, size: 0.9 });
       // herd pass 2: back R→L, a size up
       this._chase(T(5.7), 0.08, R2L, 'horsetail', 0.48, { palette: GOLD, sound: 'small' });
       // hit 3: the full stack — mid crimson, low fans weaving, a dahlia
       // and a giant spider on the shoulders (the spider is huge but ~1k)
-      this._salvo(T(8), ALL9, 'peony', 0.6, { palette: CRIMSON, layer: 'mid', sound: 'med' });
+      this._salvo(T(8), ALL9, 'ghost', 0.75, { palette: CRIMSON, layer: 'mid', sound: 'med' });
       this._fan(T(8.15), 10, 5, 52, -15, { palette: GOLD });
       this._fan(T(8.22), 12, 5, 52, 15, { palette: GOLD });
       this._cue(T(8.45), 2, 'dahlia', 1.2, {
@@ -489,10 +492,13 @@ export class FinaleShow {
         // odd bars borrow a pontoon pad: same volley, one break nearer the
         // camp — cheap depth the real barges get for free
         const group = k % 2 ? [...ODDS, 9 + (k % 5)] : EVENS;
-        this._volley(bar, group, 'peony', randRange(0.44, 0.54), {
-          palette: pal, layer: 'mid', sound: 'med',
-          pistil: { color: pal.b, ratio: 0.38 },
-        }, 0.055);
+        const fam = k % 4; // rotate shell families bar to bar
+        this._volley(bar, group,
+          fam === 1 ? 'ghost' : fam === 2 ? 'crossette' : fam === 3 ? 'dragoneggs' : 'peony',
+          randRange(0.56, 0.66), {
+            palette: pal, layer: 'mid', sound: 'med',
+            pistil: fam === 0 ? { color: pal.b, ratio: 0.38 } : undefined,
+          }, 0.055);
         if (k % 2 === 0) {
           // the woven crisscross: adjacent pontoon pads lean opposite ways
           const lowPad = 9 + ((k / 2) | 0) % 5;
@@ -516,8 +522,8 @@ export class FinaleShow {
         palette: SCARLET, sound: 'big', anchor: true, engine: true, tail: 'glitter', speed: 62, flightT: 3.4,
       });
       // two all-pad hits keep the scene honest
-      this._salvo(T(22.8), ALL9, 'ring', 0.45, { palette: CRIMSON, layer: 'mid', sound: 'med' });
-      this._salvo(T(37.4), ALL9, 'peony', 0.48, { palette: SCARLET, layer: 'mid', sound: 'med' });
+      this._salvo(T(22.8), ALL9, 'ring', 0.6, { palette: CRIMSON, layer: 'mid', sound: 'med' });
+      this._salvo(T(37.4), ALL9, 'ghost', 0.62, { palette: SCARLET, layer: 'mid', sound: 'med' });
       // one rolling fireball low over the dunes to close the tide
       this._cue(T(40.9), 11, 'lampare', 1.0, {
         palette: CRIMSON, sound: 'big', anchor: true, lift: true, speed: 24, flightT: 1.3,
@@ -537,35 +543,35 @@ export class FinaleShow {
       // in mid-air, announcing the new scene's family
       this._chase(T(45.2), 0.11, L2R, 'ghost', 0.55, { palette: VIOLET, sound: 'small' });
       // smiley trio beaming at camp
-      this._volley(T(48.6), [2, 4, 6], 'smiley', 1.0, { palette: VIOLET, sound: 'med', lifts: 3 }, 0.12);
+      this._volley(T(48.6), [2, 4, 6], 'smiley', 1.45, { palette: VIOLET, sound: 'med', lifts: 3 }, 0.12);
       this._mineFront(T(50.4), [11], { palette: VIOLET, size: 0.7, lifts: 1 });
       // hydrangea I: pistil rings in changing colors (NatDay 2023 scene 5)
-      this._volley(T(51.5), EVENS, 'ring', 0.7, {
+      this._volley(T(51.5), EVENS, 'ring', 0.95, {
         palette: TEAL, sound: 'small', pistil: { ratio: 0.4 },
       }, 0.08);
       // twin hearts toward camp, then a smaller echo pair
-      this._volley(T(54.8), [3, 5], 'heart', 1.05, { palette: PAL('scarlet pink'), sound: 'med', lifts: 2 }, 0.1);
-      this._volley(T(56.4), [2, 6], 'heart', 0.8, { palette: PAL('scarlet pink'), sound: 'small', lifts: 1 }, 0.1);
+      this._volley(T(54.8), [3, 5], 'heart', 1.5, { palette: PAL('scarlet pink'), sound: 'med', lifts: 2 }, 0.1);
+      this._volley(T(56.4), [2, 6], 'heart', 1.1, { palette: PAL('scarlet pink'), sound: 'small', lifts: 1 }, 0.1);
       this._volley(T(57.7), [0, 8], 'peony', 0.45, { palette: VIOLET, sound: 'small' }, 0.15);
       // silver corkscrews and butterflies — the silent novelties
-      this._volley(T(58.6), [1, 7], 'tourbillon', 1.0, { palette: PAL('silver'), sound: null }, 0.15);
-      this._volley(T(59.5), [3, 5], 'farfalle', 1.0, { palette: VIOLET, sound: null }, 0.2);
+      this._volley(T(58.6), [1, 7], 'tourbillon', 1.3, { palette: PAL('silver'), sound: null }, 0.15);
+      this._volley(T(59.5), [3, 5], 'farfalle', 1.3, { palette: VIOLET, sound: null }, 0.2);
       // red five-pointed stars: the strongly SHAPED statement, full width
-      this._volley(T(61.7), [2, 4, 6], 'star5', 1.0, { palette: PAL('strontium red'), sound: 'med', lifts: 3 }, 0.12);
+      this._volley(T(61.7), [2, 4, 6], 'star5', 1.4, { palette: PAL('strontium red'), sound: 'med', lifts: 3 }, 0.12);
       // a fish shell swims across the gap
       this._cue(T(63.2), 3, 'fish', 1.0, { palette: TEAL, sound: null, speed: 46, flightT: 2.4, lift: true });
       // hydrangea II + a saturn pair in blue-gold
-      this._volley(T(64.2), ODDS, 'ring', 0.65, {
+      this._volley(T(64.2), ODDS, 'ring', 0.9, {
         palette: BLUEGOLD, sound: 'small', pistil: { ratio: 0.4 },
       }, 0.08);
-      this._volley(T(65.6), [2, 6], 'saturn', 0.9, { palette: BLUEGOLD, sound: 'med' }, 0.3);
+      this._volley(T(65.6), [2, 6], 'saturn', 1.1, { palette: BLUEGOLD, sound: 'med' }, 0.3);
       this._mineFront(T(66.4), [9, 13], { palette: BLUEGOLD, size: 0.7, lifts: 1 });
       // bees: a frantic little gold swarm under the closing tableau
       this._cue(T(66.9), 4, 'bees', 1.0, { palette: GOLD, sound: null, speed: 40, flightT: 2.2, lift: true });
       // the tableau: five shapes alight at once, then breathe out
-      this._cue(T(68.0), 4, 'smiley', 1.05, { palette: VIOLET, sound: 'med', lift: true, speed: 44, flightT: 2.4 });
-      this._volley(T(68.1), [2, 6], 'heart', 0.9, { palette: PAL('scarlet pink'), sound: 'small', lifts: 1 }, 0.06);
-      this._volley(T(68.2), [0, 8], 'star5', 0.9, { palette: PAL('strontium red'), sound: 'small', lifts: 1 }, 0.06);
+      this._cue(T(68.0), 4, 'smiley', 1.5, { palette: VIOLET, sound: 'med', lift: true, speed: 44, flightT: 2.4 });
+      this._volley(T(68.1), [2, 6], 'heart', 1.25, { palette: PAL('scarlet pink'), sound: 'small', lifts: 1 }, 0.06);
+      this._volley(T(68.2), [0, 8], 'star5', 1.25, { palette: PAL('strontium red'), sound: 'small', lifts: 1 }, 0.06);
     }
 
     // ================= SCENE 4 — "DESERT SEA" (70-90) =================
@@ -615,31 +621,31 @@ export class FinaleShow {
       // pass 1 waits for curtain 1's 7-second stars to die (~92) — peony,
       // not brocade, and light: the ring cursor laps every ~96k spawns,
       // so heavy fire here would wrap onto the curtain while it still hangs
-      this._chase(T(92.2), 0.12, L2R, 'peony', 0.42, { palette: BROC, sound: 'small' });
-      this._chase(T(94.4), 0.10, R2L, 'peony', 0.45, { palette: GOLD, sound: 'small' });
+      this._chase(T(92.2), 0.12, L2R, 'crackle', 0.55, { palette: BROC, sound: 'small' });
+      this._chase(T(94.4), 0.10, R2L, 'peony', 0.58, { palette: GOLD, sound: 'small' });
       this._cue(T(95.2), 3, 'bees', 1.0, { palette: GOLD, sound: null, speed: 42, flightT: 2.3, lift: true });
       this._cue(T(95.9), 5, 'fish', 1.0, { palette: BROC, sound: null, speed: 44, flightT: 2.4 });
-      this._chase(T(96.7), 0.09, OUTSIDE_IN, 'peony', 0.48, { palette: GOLD, sound: 'small' });
+      this._chase(T(96.7), 0.09, OUTSIDE_IN, 'ghost', 0.62, { palette: GOLD, sound: 'small' });
       // second layer joins: fans weaving under the chases
       this._fan(T(96.9), 10, 5, 48, -14, { palette: GOLD });
       this._fan(T(97.0), 12, 5, 48, 14, { palette: GOLD });
       // all-pad hit + mines
-      this._salvo(T(99.4), ALL9, 'peony', 0.5, { palette: GOLD, layer: 'mid', sound: 'med' });
+      this._salvo(T(99.4), ALL9, 'peony', 0.65, { palette: GOLD, layer: 'mid', sound: 'med' });
       this._mineFront(T(99.5), [10, 12], { palette: GOLD, size: 0.9, lifts: 1 });
       // spiders: gold lightning across the whole arc, almost free
       this._chase(T(100.9), 0.08, L2R, 'spider', 0.8, { palette: GOLD, sound: 'small' });
       // dragon eggs crackle texture
       this._cue(T(102.5), 2, 'dragoneggs', 1.0, { palette: BROC, sound: null, speed: 44, flightT: 2.3, lift: true });
       this._cue(T(103.2), 6, 'dragoneggs', 1.0, { palette: BROC, sound: null, speed: 44, flightT: 2.3 });
-      this._chase(T(104.0), 0.075, R2L, 'peony', 0.5, { palette: GOLD, sound: 'small' });
+      this._chase(T(104.0), 0.075, R2L, 'crossette', 0.62, { palette: GOLD, sound: 'small' });
       // thousand-bloom: dim ember cloud, then every ember pops at once —
       // fired into a held gap so the synchronized pop owns the sky
       this._cue(T(106.6), 4, 'thousandbloom', 1.1, {
         palette: BROC, sound: 'med', anchor: true, lift: true, speed: 56, flightT: 3.0,
       });
-      this._chase(T(108.5), 0.07, OUTSIDE_IN, 'peony', 0.48, { palette: BROC, sound: 'small' });
+      this._chase(T(108.5), 0.07, OUTSIDE_IN, 'crackle', 0.6, { palette: BROC, sound: 'small' });
       // all-pad hit + the first pre-finale thunderclap
-      this._salvo(T(110.7), ALL9, 'peony', 0.52, { palette: GOLD, layer: 'mid', sound: 'med' });
+      this._salvo(T(110.7), ALL9, 'crackle', 0.68, { palette: GOLD, layer: 'mid', sound: 'med' });
       this._cue(T(110.9), 4, 'salute', 0.7, { sound: 'big', lift: true, speed: 44, flightT: 2.1 });
       this._volley(T(112.1), [2, 6], 'thousandbloom', 1.0, { palette: BROC, sound: 'med', lifts: 2 }, 0.15);
       // accelerando: trio volleys, interval 1.5 → 0.28 s — the herd breaks

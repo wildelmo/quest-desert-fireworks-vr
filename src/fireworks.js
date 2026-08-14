@@ -35,21 +35,21 @@ export const ITEM_TYPES = {
     kind: 'rocket', label: 'Bottle Rocket',
     bodyR: 0.018, bodyLen: 0.11, stickLen: 0.55,
     size: 0.32, fuseTime: 2.0, thrust: 46, burnTime: 0.85, coast: 1.15,
-    shells: ['peony', 'dahlia', 'ring', 'crackle', 'strobe', 'ghost'],
+    shells: ['peony', 'dahlia', 'ring', 'crackle', 'strobe', 'ghost', 'bees', 'dragoneggs'],
     weight: 3,
   },
   rocketMed: {
     kind: 'rocket', label: 'Sky Rocket',
     bodyR: 0.028, bodyLen: 0.17, stickLen: 0.72,
     size: 0.6, fuseTime: 2.6, thrust: 42, burnTime: 1.4, coast: 1.5,
-    shells: ['peony', 'dahlia', 'chrys', 'willow', 'ring', 'saturn', 'crossette', 'crackle', 'serpents', 'ghost'],
+    shells: ['peony', 'dahlia', 'chrys', 'willow', 'ring', 'saturn', 'crossette', 'crackle', 'serpents', 'ghost', 'spider', 'fish', 'dragoneggs', 'tourbillon'],
     weight: 3,
   },
   rocketLarge: {
     kind: 'rocket', label: 'Mammoth Rocket',
     bodyR: 0.042, bodyLen: 0.26, stickLen: 0.92,
     size: 1.3, fuseTime: 3.2, thrust: 43, burnTime: 2.1, coast: 2.2,
-    shells: ['peony', 'dahlia', 'chrys', 'willow', 'palm', 'crossette', 'brocade', 'serpents', 'multibreak', 'kamuro', 'ghost', 'saturn', 'horsetail'],
+    shells: ['peony', 'dahlia', 'chrys', 'willow', 'palm', 'crossette', 'brocade', 'serpents', 'multibreak', 'kamuro', 'ghost', 'saturn', 'horsetail', 'spider', 'farfalle', 'tourbillon', 'strobewillow', 'dragoneggs'],
     weight: 2,
   },
   rocketGrand: {
@@ -58,7 +58,7 @@ export const ITEM_TYPES = {
     size: 1.8, fuseTime: 3.6, thrust: 45, burnTime: 2.45, coast: 2.45,
     // dahlia twice: the grand shells are the display pieces, and the
     // long-ray dahlia is the postcard look they exist for
-    shells: ['peony', 'dahlia', 'dahlia', 'chrys', 'willow', 'palm', 'brocade', 'serpents', 'multibreak', 'kamuro', 'kamuro', 'ghost', 'timerain', 'horsetail', 'leaves'],
+    shells: ['peony', 'dahlia', 'dahlia', 'chrys', 'willow', 'palm', 'brocade', 'serpents', 'multibreak', 'kamuro', 'kamuro', 'ghost', 'timerain', 'horsetail', 'leaves', 'thousandbloom', 'strobewillow', 'spider', 'heart', 'smiley', 'star5', 'flare'],
     weight: 2,
   },
   fountain: {
@@ -1348,8 +1348,8 @@ export class FireworksSystem {
     const col = new THREE.Color(item.palette.a);
     const flightT = isFinale ? 3.0 : randRange(2.3, 2.7);
     const pattern = isFinale
-      ? randPick(['multibreak', 'palm', 'dahlia', 'chrys', 'brocade', 'serpents', 'kamuro', 'timerain', 'saturn'])
-      : randPick(['peony', 'dahlia', 'ring', 'crackle', 'strobe', 'willow', 'serpents', 'ghost', 'saturn', 'leaves']);
+      ? randPick(['multibreak', 'palm', 'dahlia', 'chrys', 'brocade', 'serpents', 'kamuro', 'timerain', 'saturn', 'thousandbloom', 'strobewillow', 'farfalle'])
+      : randPick(['peony', 'dahlia', 'ring', 'crackle', 'strobe', 'willow', 'serpents', 'ghost', 'saturn', 'leaves', 'spider', 'dragoneggs', 'bees', 'tourbillon']);
     this._fireShot(muzzle, vel, col, 1.35, {
       gravity: 0.9, drag: 0.35, flightT,
       onBurst: (p, v) => this.burst(p, {
@@ -3082,7 +3082,10 @@ export class FireworksSystem {
           // smoke wisps and a couple of gold drips, all birth-offset onto
           // the leg's exact arc
           const seg1 = 9; // head + halo + 5 smoke + 2 drips
-          const fsz = 0.24 * (0.75 + 0.35 * size);
+          // sized to read from camp: an illumination flare is the brightest
+          // object in the valley, and at 80-100 m a 0.25 m glow vanished —
+          // the head needs real diameter and the halo needs to swallow it
+          const fsz = 0.42 * (0.75 + 0.35 * size);
           const gA = 9.81 * gF;
           let pj = -1;
           pool.spawn(path.length * seg1, (i) => {
@@ -3101,9 +3104,9 @@ export class FireworksSystem {
               // fat dim halo on the same arc — the lens bloom of a light
               // source far too bright for the night around it
               pool.set(i, leg.x, leg.y, leg.z, leg.vx, leg.vy, leg.vz,
-                col[0] * 1.1, col[1] * 1.1, col[2] * 1.1,
+                col[0] * 1.35, col[1] * 1.35, col[2] * 1.35,
                 time + leg.t0, leg.dur,
-                fsz * 4.2, gF, dF, 0,
+                fsz * 7, gF, dF, 0,
                 CELL.GLOW, 0);
             } else if (seg <= 6) {
               // the thin smoke thread every flare hangs above itself

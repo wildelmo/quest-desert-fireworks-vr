@@ -14,10 +14,10 @@ flame to the fuse. Step back.
 
 | Item | What it does |
 | --- | --- |
-| **Bottle Rocket** | small, quick, snappy pop — sometimes a little ghost shell that changes color mid-air |
-| **Sky Rocket** | the classic — peony, dahlia, ring, Saturn (core + orbiting ring), willow, crossette, ghost… |
-| **Mammoth Rocket** | huge multi-break shells, palm bursts, kamuro crowns, drooping horsetails, serious bass |
-| **Grand Shell Rocket** | high, slow-opening display shells — gold kamuro, time-rain (glitter that keeps popping after the stars die), falling leaves, ghost relays |
+| **Bottle Rocket** | small, quick, snappy pop — sometimes a ghost shell that changes color mid-air, a frantic **bee swarm**, or **dragon eggs** that hatch in crackling flashes |
+| **Sky Rocket** | the classic — peony, dahlia, ring, Saturn, willow, crossette, ghost… plus leggy **spider shells**, **swimming fish stars**, and silver **tourbillon corkscrews** |
+| **Mammoth Rocket** | huge multi-break shells, palm bursts, kamuro crowns, drooping horsetails, spinning **farfalle butterflies**, a **strobe-willow** that falls as a blinking silver sea, serious bass |
+| **Grand Shell Rocket** | high, slow-opening display shells — gold kamuro, time-rain, falling leaves, ghost relays, the sky-filling **thousand-bloom**, camera-facing **hearts / smileys / stars**, and the odd **parachute flare** that lights the dunes for fifteen seconds |
 | **Desert Bloom Fountain** | 10 seconds of color-shifting sparks and hiss |
 | **Roman Candle** | 8 comets — you can hold this one while it fires and aim it |
 | **Finale Cake** | 16-shot barrage with brocade crowns, serpent stars, and a triple-break finale |
@@ -31,14 +31,20 @@ quietly restocks itself.
 Off to the right of camp sits a wooden **TNT plunger box** — hazard chevrons, blinking
 armed lamp, red wire snaking away over the dunes. Grab the T-handle and shove it all the
 way down (desktop: just click it). A spark races along the wire to a buried mortar
-battery and a choreographed **two-minute grand finale** fills the sky: an opening gold
-**kamuro crown**, color chases (the return lap is all **ghost shells** that change color
-in mid-air), a hushed interlude of willows, horsetails and eerie falling leaves,
-**niagara waterfall curtains** — lines of horsetail shells breaking in unison so their
-striated silver trails pour down the sky in sheets, frying-metal sizzle and all — a
-gold **time-rain** whose glitter keeps popping long after the stars die, then an
-escalating barrage and a salute chain to close. The handle springs back up when the
-desert goes quiet, ready to go again.
+battery — nine pads in an arc plus a nearer five-pad "pontoon" row — and a
+choreographed **two-and-a-half-minute show at Victoria Harbour pace** fills the sky,
+fired as *volleys, never polite singles* (~750 launches, peaking around twenty a
+second). Six scenes: a **galloping triple-salvo opening** that rips across the arc in
+waves; a crimson tide of **pistil-heart volleys** under glitter-tail chrysanthemum
+anchors, woven **fan-comet crisscrosses** underneath; a pastel novelty garden of
+**smileys, twin hearts and red five-pointed stars** that face the campsite, hydrangea
+rings, butterflies and corkscrews; a hushed interlude — **parachute flares** drifting
+over a shimmer of mines, one colossal lone gold **kamuro**, the **niagara waterfall
+curtains** (kept exactly as they were, frying-metal sizzle and all), a strobe-willow
+sea; an accelerando of ripple chases; and then 2.5 seconds of dead black before the
+**SUPER GOLD WALL** — every pad, three altitude bands at once, twelve seconds of solid
+gold — capped by a thirty-salute ripple and three giant crowns, then a hard cut to
+black. The handle springs back up when the desert goes quiet, ready to go again.
 
 ## The Colossus
 
