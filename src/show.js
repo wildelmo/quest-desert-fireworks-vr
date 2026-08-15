@@ -322,7 +322,7 @@ export class FinaleShow {
       const base = (beat * 4) % 9;
       const trio = [base, (base + 3) % 9, (base + 6) % 9];
       const spider = beat % 3 === 2;
-      n += this._volley(t, trio, spider ? 'spider' : beat % 4 === 1 ? 'ghost' : beat % 4 === 3 ? 'crackle' : 'peony', spider ? 0.9 : 0.55, {
+      n += this._volley(t, trio, spider ? 'spider' : beat % 2 ? 'crackle' : 'peony', spider ? 0.9 : 0.55, {
         palette: GOLD, sound: 'med', layer: beat % 2 ? 'mid' : 'low', lifts: 1,
       }, 0.05);
       // low band: woven fans off both wings, alternating lean; mines on
@@ -543,21 +543,21 @@ export class FinaleShow {
       // in mid-air, announcing the new scene's family
       this._chase(T(45.2), 0.11, L2R, 'ghost', 0.55, { palette: VIOLET, sound: 'small' });
       // smiley trio beaming at camp
-      this._volley(T(48.6), [2, 4, 6], 'smiley', 1.45, { palette: VIOLET, sound: 'med', lifts: 3 }, 0.12);
+      this._volley(T(48.6), [2, 4, 6], 'smiley', 1.8, { palette: VIOLET, sound: 'med', lifts: 3 }, 0.12);
       this._mineFront(T(50.4), [11], { palette: VIOLET, size: 0.7, lifts: 1 });
       // hydrangea I: pistil rings in changing colors (NatDay 2023 scene 5)
       this._volley(T(51.5), EVENS, 'ring', 0.95, {
         palette: TEAL, sound: 'small', pistil: { ratio: 0.4 },
       }, 0.08);
       // twin hearts toward camp, then a smaller echo pair
-      this._volley(T(54.8), [3, 5], 'heart', 1.5, { palette: PAL('scarlet pink'), sound: 'med', lifts: 2 }, 0.1);
-      this._volley(T(56.4), [2, 6], 'heart', 1.1, { palette: PAL('scarlet pink'), sound: 'small', lifts: 1 }, 0.1);
+      this._volley(T(54.8), [3, 5], 'heart', 1.85, { palette: PAL('scarlet pink'), sound: 'med', lifts: 2 }, 0.1);
+      this._volley(T(56.4), [2, 6], 'heart', 1.35, { palette: PAL('scarlet pink'), sound: 'small', lifts: 1 }, 0.1);
       this._volley(T(57.7), [0, 8], 'peony', 0.45, { palette: VIOLET, sound: 'small' }, 0.15);
       // silver corkscrews and butterflies — the silent novelties
       this._volley(T(58.6), [1, 7], 'tourbillon', 1.3, { palette: PAL('silver'), sound: null }, 0.15);
       this._volley(T(59.5), [3, 5], 'farfalle', 1.3, { palette: VIOLET, sound: null }, 0.2);
       // red five-pointed stars: the strongly SHAPED statement, full width
-      this._volley(T(61.7), [2, 4, 6], 'star5', 1.4, { palette: PAL('strontium red'), sound: 'med', lifts: 3 }, 0.12);
+      this._volley(T(61.7), [2, 4, 6], 'star5', 1.75, { palette: PAL('strontium red'), sound: 'med', lifts: 3 }, 0.12);
       // a fish shell swims across the gap
       this._cue(T(63.2), 3, 'fish', 1.0, { palette: TEAL, sound: null, speed: 46, flightT: 2.4, lift: true });
       // hydrangea II + a saturn pair in blue-gold
@@ -569,9 +569,9 @@ export class FinaleShow {
       // bees: a frantic little gold swarm under the closing tableau
       this._cue(T(66.9), 4, 'bees', 1.0, { palette: GOLD, sound: null, speed: 40, flightT: 2.2, lift: true });
       // the tableau: five shapes alight at once, then breathe out
-      this._cue(T(68.0), 4, 'smiley', 1.5, { palette: VIOLET, sound: 'med', lift: true, speed: 44, flightT: 2.4 });
-      this._volley(T(68.1), [2, 6], 'heart', 1.25, { palette: PAL('scarlet pink'), sound: 'small', lifts: 1 }, 0.06);
-      this._volley(T(68.2), [0, 8], 'star5', 1.25, { palette: PAL('strontium red'), sound: 'small', lifts: 1 }, 0.06);
+      this._cue(T(68.0), 4, 'smiley', 1.85, { palette: VIOLET, sound: 'med', lift: true, speed: 44, flightT: 2.4 });
+      this._volley(T(68.1), [2, 6], 'heart', 1.5, { palette: PAL('scarlet pink'), sound: 'small', lifts: 1 }, 0.06);
+      this._volley(T(68.2), [0, 8], 'star5', 1.5, { palette: PAL('strontium red'), sound: 'small', lifts: 1 }, 0.06);
     }
 
     // ================= SCENE 4 — "DESERT SEA" (70-90) =================
