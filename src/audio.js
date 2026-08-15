@@ -55,9 +55,24 @@ export class AudioEngine {
     this.comp.attack.value = 0.006;
     this.comp.release.value = 0.30;
 
+    // Brick-wall safety limiter, the last node before the DAC. The glue
+    // comp above shapes the mix but at ratio 3.5 a thirty-salute finale
+    // pileup still sums far past 0 dBFS and the browser output hard-clips —
+    // the "staticky breakup" at the end of the show. Ratio 20 / zero knee /
+    // 1 ms attack is transparent below -2 dB and simply refuses to clip
+    // above it. The samples themselves are untouched: this is mastering,
+    // the same brick-wall every real broadcast chain ends in.
+    this.limiter = ctx.createDynamicsCompressor();
+    this.limiter.threshold.value = -2;
+    this.limiter.knee.value = 0;
+    this.limiter.ratio.value = 20;
+    this.limiter.attack.value = 0.001;
+    this.limiter.release.value = 0.12;
+
     this.master.connect(this.shelf);
     this.shelf.connect(this.comp);
-    this.comp.connect(ctx.destination);
+    this.comp.connect(this.limiter);
+    this.limiter.connect(ctx.destination);
 
     // shared desert reverb
     this.convolver = ctx.createConvolver();
