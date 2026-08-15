@@ -751,8 +751,12 @@ export class FinaleShow {
       });
       const ripple = [...L2R, ...R2L, ...OUTSIDE_IN];
       ripple.forEach((p, k) => {
+        // reports alternate big/med: at 0.12 s spacing the ear hears one
+        // accelerating thunder roll either way, but half the pileup — 30
+        // simultaneous big-class voices (each towing a crackle tail) were
+        // overloading the audio thread into dropouts on Quest
         this._cue(t3 + 0.35 + k * 0.12, p, 'salute', 0.55 + 0.3 * (k / ripple.length), {
-          palette: PAL('silver'), sound: 'big', lift: k % 2 === 0,
+          palette: PAL('silver'), sound: k % 2 ? 'med' : 'big', lift: k % 3 === 0,
           speed: randRange(41, 46), flightT: randRange(2.0, 2.3),
         });
       });
