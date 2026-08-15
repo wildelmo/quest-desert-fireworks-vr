@@ -432,7 +432,10 @@ export class FinaleShow {
     // HK CNY 2026 opening: full width and full altitude inside the first
     // seconds — three all-pad hits at t=0/4/8 with the galloping-horse
     // horsetail ripples (80 ms offsets) charging between them, each pass
-    // a size louder. Crimson shells over pure gold.
+    // a size louder. Crimson and gold trade the sky, and hit 2 is a cold
+    // teal-ember splash so the first fifteen seconds read red+gold+accent
+    // rather than a red block (the ghost hit at t=8 relights to a random
+    // palette mid-air — free variety the engine hands us).
     const CRIMSON = PAL('crimson gold');
     {
       // hit 1: nine mid-band crimson peonies inside 100 ms under one grand
@@ -447,8 +450,9 @@ export class FinaleShow {
       });
       // herd pass 1: gold horsetails L→R (cheap shells, ~0.9k each)
       this._chase(T(1.7), 0.08, L2R, 'horsetail', 0.42, { palette: GOLD, sound: 'small' });
-      // hit 2: crimson again — and the pontoon row wakes up underneath
-      this._salvo(T(4), ALL9, 'crackle', 0.68, { palette: CRIMSON, layer: 'mid', sound: 'med' });
+      // hit 2: the cold answer — teal stars over ember tips — and the
+      // pontoon row wakes up underneath in gold
+      this._salvo(T(4), ALL9, 'crackle', 0.68, { palette: PAL('teal ember'), layer: 'mid', sound: 'med' });
       this._mineFront(T(4.12), LOW, { palette: GOLD, size: 0.9 });
       // herd pass 2: back R→L, a size up
       this._chase(T(5.7), 0.08, R2L, 'horsetail', 0.48, { palette: GOLD, sound: 'small' });
@@ -474,13 +478,20 @@ export class FinaleShow {
     }
 
     // ================= SCENE 2 — "CRIMSON TIDE" (15-45) =================
-    // The spectacle scene: pistil-heart peony volleys pulsing on a ~2 s
-    // bar that is never quite metronomic, woven fan sweeps filling the
-    // off-beats from the pontoon row, one big glitter-tail anchor every
-    // ~8 s. Palette holds crimson/gold, then shifts scarlet/pink at the
-    // half — scene changes swap color AND rhythm together.
+    // The spectacle scene as a COLOR CONVERSATION: crimson still leads —
+    // it is the tide — but every statement bar is answered by two or three
+    // quicker, smaller bars in cold and gold palettes before red speaks
+    // again. Bars pulse ~1.6 s (never metronomic); statement bars are the
+    // big mid-band gestures, answer bars are small-quick and sometimes
+    // low — the caliber contrast is what makes the pulse read as pace.
+    // At the half the whole rotation shifts a family (strontium/copper/
+    // brocade/teal-ember) so the scene evolves without going monochrome.
+    // Anchors deliberately CONTRAST the field they land over.
     {
       const SCARLET = PAL('scarlet pink');
+      // red leads, cold answers, gold glues — rotation A then B at the half
+      const ROT_A = [CRIMSON, PAL('oasis teal'), SCARLET, PAL('blue gold')];
+      const ROT_B = [PAL('strontium red'), PAL('copper blue'), PAL('golden brocade'), PAL('teal ember')];
       const hitTimes = [T(22.8), T(37.4)]; // the all-pad hits ARE those bars
       let bar = T(15.6), k = 0;
       while (bar < T(43.5)) {
@@ -488,35 +499,42 @@ export class FinaleShow {
         // hit takes that beat, the pulse never stops
         const hit = hitTimes.find((h) => Math.abs(bar - h) < 1.15);
         if (hit) bar = hit + randRange(1.2, 1.5);
-        const pal = bar < T(30) ? CRIMSON : SCARLET;
+        const pal = (bar < T(30) ? ROT_A : ROT_B)[k % 4];
+        const statement = k % 4 === 0; // the red bar: bigger, slower, mid band
         // odd bars borrow a pontoon pad: same volley, one break nearer the
         // camp — cheap depth the real barges get for free
         const group = k % 2 ? [...ODDS, 9 + (k % 5)] : EVENS;
-        const fam = k % 4; // rotate shell families bar to bar
+        const fam = k % 5; // rotate shell families bar to bar (5 vs 4-color
+        // rotation is coprime, so family x color combinations keep walking)
         this._volley(bar, group,
-          fam === 1 ? 'ghost' : fam === 2 ? 'crossette' : fam === 3 ? 'dragoneggs' : 'peony',
-          randRange(0.56, 0.66), {
-            palette: pal, layer: 'mid', sound: 'med',
+          fam === 1 ? 'ghost' : fam === 2 ? 'crossette' : fam === 3 ? 'serpents' : fam === 4 ? 'dragoneggs' : 'peony',
+          statement ? randRange(0.62, 0.72) : randRange(0.42, 0.52), {
+            palette: pal, layer: statement ? 'mid' : k % 3 === 2 ? 'low' : 'mid',
+            sound: statement ? 'med' : 'small',
             pistil: fam === 0 ? { color: pal.b, ratio: 0.38 } : undefined,
-          }, 0.055);
+          }, statement ? 0.07 : 0.045);
         if (k % 2 === 0) {
-          // the woven crisscross: adjacent pontoon pads lean opposite ways
+          // the woven crisscross: adjacent pontoon pads lean opposite ways;
+          // gold under the statements, the bar's color under the answers
           const lowPad = 9 + ((k / 2) | 0) % 5;
-          this._fan(bar + randRange(0.9, 1.15), lowPad, 5, 52, k % 4 === 0 ? -16 : 16, { palette: pal });
+          this._fan(bar + randRange(0.9, 1.15), lowPad, 5, 52, k % 4 === 0 ? -16 : 16,
+            { palette: k % 4 === 0 ? GOLD : pal });
         }
         if (k % 5 === 3) this._mineFront(bar + 0.5, [9 + (k % 5)], { palette: pal, size: 0.8, lifts: 1 });
         k++;
-        bar += randRange(1.7, 2.1); // on the beat, never on a grid
+        bar += randRange(1.45, 1.75); // on the beat, never on a grid
       }
-      // sparse anchors: big ray shells with tremalon rise, one at a time
+      // sparse anchors: big ray shells with tremalon rise, one at a time —
+      // the middle two are COLD against the warm field (contrast, the
+      // thing that keeps a 30 s scene from reading as one red block)
       this._cue(T(19.6), 2, 'chrys', 1.2, {
         palette: CRIMSON, sound: 'big', anchor: true, engine: true, tail: 'glitter', speed: 60, flightT: 3.3,
       });
       this._cue(T(27.2), 6, 'dahlia', 1.15, {
-        palette: CRIMSON, sound: 'big', anchor: true, engine: true, tail: 'glitter', speed: 61, flightT: 3.4,
+        palette: PAL('oasis teal'), sound: 'big', anchor: true, engine: true, tail: 'glitter', speed: 61, flightT: 3.4,
       });
       this._cue(T(35.1), 3, 'chrys', 1.15, {
-        palette: SCARLET, sound: 'big', anchor: true, engine: true, tail: 'glitter', speed: 60, flightT: 3.3,
+        palette: PAL('blue gold'), sound: 'big', anchor: true, engine: true, tail: 'glitter', speed: 60, flightT: 3.3,
       });
       this._cue(T(42.6), 5, 'dahlia', 1.25, {
         palette: SCARLET, sound: 'big', anchor: true, engine: true, tail: 'glitter', speed: 62, flightT: 3.4,
@@ -533,8 +551,10 @@ export class FinaleShow {
     // ================ SCENE 3 — "LANTERN GARDEN" (45-70) ================
     // The novelty scene (HK since 2018): shaped shells mid-altitude in
     // matched pairs and trios with real breathing room between gestures.
-    // Pastel rotation — violet, teal, blue-gold — and every 2D shell plane
-    // faces the campsite: the free upgrade over the real harbour.
+    // The garden plants the WHOLE roster — violet, emerald, teal, copper
+    // blue, blue-gold, scarlet, silver — no two consecutive gestures from
+    // the same family, and every 2D shell plane faces the campsite: the
+    // free upgrade over the real harbour.
     {
       const VIOLET = PAL('royal violet');
       const TEAL = PAL('oasis teal');
@@ -546,16 +566,22 @@ export class FinaleShow {
       this._volley(T(48.6), [2, 4, 6], 'smiley', 1.8, { palette: VIOLET, sound: 'med', lifts: 3 }, 0.12);
       this._mineFront(T(50.4), [11], { palette: VIOLET, size: 0.7, lifts: 1 });
       // hydrangea I: pistil rings in changing colors (NatDay 2023 scene 5)
+      // — barium emerald's debut, a color the show never wore before
       this._volley(T(51.5), EVENS, 'ring', 0.95, {
-        palette: TEAL, sound: 'small', pistil: { ratio: 0.4 },
+        palette: PAL('barium emerald'), sound: 'small', pistil: { ratio: 0.4 },
       }, 0.08);
       // twin hearts toward camp, then a smaller echo pair
       this._volley(T(54.8), [3, 5], 'heart', 1.85, { palette: PAL('scarlet pink'), sound: 'med', lifts: 2 }, 0.1);
       this._volley(T(56.4), [2, 6], 'heart', 1.35, { palette: PAL('scarlet pink'), sound: 'small', lifts: 1 }, 0.1);
-      this._volley(T(57.7), [0, 8], 'peony', 0.45, { palette: VIOLET, sound: 'small' }, 0.15);
-      // silver corkscrews and butterflies — the silent novelties
+      this._volley(T(57.7), [0, 8], 'peony', 0.45, { palette: PAL('copper blue'), sound: 'small' }, 0.15);
+      // silver corkscrews and butterflies — the silent novelties (the
+      // butterflies in teal-over-ember, not more violet)
       this._volley(T(58.6), [1, 7], 'tourbillon', 1.3, { palette: PAL('silver'), sound: null }, 0.15);
-      this._volley(T(59.5), [3, 5], 'farfalle', 1.3, { palette: VIOLET, sound: null }, 0.2);
+      this._volley(T(59.5), [3, 5], 'farfalle', 1.3, { palette: PAL('teal ember'), sound: null }, 0.2);
+      // emerald go-getters wriggle through the gap before the stars land
+      this._volley(T(60.9), [1, 7], 'serpents', 0.9, {
+        palette: PAL('barium emerald'), sound: 'small', speed: 46, flightT: 2.2,
+      }, 0.2);
       // red five-pointed stars: the strongly SHAPED statement, full width
       this._volley(T(61.7), [2, 4, 6], 'star5', 1.75, { palette: PAL('strontium red'), sound: 'med', lifts: 3 }, 0.12);
       // a fish shell swims across the gap
@@ -615,29 +641,38 @@ export class FinaleShow {
     // altitude layers stacking one by one, novelty textures (bees, fish,
     // dragon eggs, thousand-bloom) threaded through, and a closing
     // accelerando that halves the volley interval until it's continuous.
-    // Palette narrows to gold and white.
+    // The gathering gathers COLORS too: teal, violet, copper blue, teal
+    // ember and a crimson callback to the opening all pass back through
+    // before the palette narrows to gold and white at ~108 — the narrowing
+    // is the crescendo, so gold has to be arrived at, not squatted on.
     {
       const BROC = PAL('golden brocade');
       // pass 1 waits for curtain 1's 7-second stars to die (~92) — peony,
       // not brocade, and light: the ring cursor laps every ~96k spawns,
       // so heavy fire here would wrap onto the curtain while it still hangs
       this._chase(T(92.2), 0.12, L2R, 'crackle', 0.55, { palette: BROC, sound: 'small' });
-      this._chase(T(94.4), 0.10, R2L, 'peony', 0.58, { palette: GOLD, sound: 'small' });
+      this._chase(T(94.4), 0.10, R2L, 'peony', 0.58, { palette: PAL('oasis teal'), sound: 'small' });
       this._cue(T(95.2), 3, 'bees', 1.0, { palette: GOLD, sound: null, speed: 42, flightT: 2.3, lift: true });
-      this._cue(T(95.9), 5, 'fish', 1.0, { palette: BROC, sound: null, speed: 44, flightT: 2.4 });
-      this._chase(T(96.7), 0.09, OUTSIDE_IN, 'ghost', 0.62, { palette: GOLD, sound: 'small' });
+      this._cue(T(95.9), 5, 'fish', 1.0, { palette: PAL('copper blue'), sound: null, speed: 44, flightT: 2.4 });
+      this._chase(T(96.7), 0.09, OUTSIDE_IN, 'ghost', 0.62, { palette: PAL('royal violet'), sound: 'small' });
       // second layer joins: fans weaving under the chases
       this._fan(T(96.9), 10, 5, 48, -14, { palette: GOLD });
       this._fan(T(97.0), 12, 5, 48, 14, { palette: GOLD });
-      // all-pad hit + mines
-      this._salvo(T(99.4), ALL9, 'peony', 0.65, { palette: GOLD, layer: 'mid', sound: 'med' });
+      // all-pad hit + mines — the opening's crimson comes back for one bar
+      this._salvo(T(99.4), ALL9, 'peony', 0.65, { palette: CRIMSON, layer: 'mid', sound: 'med' });
       this._mineFront(T(99.5), [10, 12], { palette: GOLD, size: 0.9, lifts: 1 });
       // spiders: gold lightning across the whole arc, almost free
       this._chase(T(100.9), 0.08, L2R, 'spider', 0.8, { palette: GOLD, sound: 'small' });
-      // dragon eggs crackle texture
-      this._cue(T(102.5), 2, 'dragoneggs', 1.0, { palette: BROC, sound: null, speed: 44, flightT: 2.3, lift: true });
-      this._cue(T(103.2), 6, 'dragoneggs', 1.0, { palette: BROC, sound: null, speed: 44, flightT: 2.3 });
-      this._chase(T(104.0), 0.075, R2L, 'crossette', 0.62, { palette: GOLD, sound: 'small' });
+      // dragon eggs crackle texture, teal over ember
+      this._cue(T(102.5), 2, 'dragoneggs', 1.0, { palette: PAL('teal ember'), sound: null, speed: 44, flightT: 2.3, lift: true });
+      this._cue(T(103.2), 6, 'dragoneggs', 1.0, { palette: PAL('teal ember'), sound: null, speed: 44, flightT: 2.3 });
+      // blue-gold crossettes: the hinge — blue streaks breaking to gold,
+      // the literal handover into the all-gold run. Five shells, not nine,
+      // on a wider gap: every crossette star re-breaks into a beaded peony
+      // (~376 spawns per split x 11 splits per shell), so a nine-shell
+      // 75 ms chase piles ~37k spawns into one second and laps the ring —
+      // the body's worst spike. Half the shells, double the read time.
+      this._chase(T(104.0), 0.14, [8, 6, 4, 2, 0], 'crossette', 0.62, { palette: PAL('blue gold'), sound: 'small' });
       // thousand-bloom: dim ember cloud, then every ember pops at once —
       // fired into a held gap so the synchronized pop owns the sky
       this._cue(T(106.6), 4, 'thousandbloom', 1.1, {
