@@ -295,7 +295,9 @@ function createMilkyWay(bandNormal) {
     (tex) => {
       const mesh = makeDome(tex);
       // dimmed so the band whispers behind the star points, not aurora-loud
-      mesh.material.color.setScalar(0.28);
+      // (0.28 read like a second moonrise once the show lit the basin —
+      // the real band is a faint smoke of light, so hold it to a fifth)
+      mesh.material.color.setScalar(0.056);
       // the photo is equirect in galactic coordinates, so its equator IS the
       // Milky Way; tip the sphere's pole onto the band normal shared with
       // the star scatter so both layers trace the same great circle
