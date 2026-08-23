@@ -6,7 +6,8 @@ import { chromium } from 'playwright-core';
 
 const browser = await chromium.launch({
   executablePath: process.env.CHROMIUM_PATH || '/opt/pw-browsers/chromium',
-  args: ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--no-sandbox'],
+  args: ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader',
+    '--autoplay-policy=no-user-gesture-required', '--no-sandbox'],
 });
 const page = await browser.newPage({ viewport: { width: 1100, height: 700 } });
 const errors = [];
@@ -56,20 +57,25 @@ const results = await page.evaluate(async () => {
   // --- contract: WIND is live and sane
   out.windSane = app.WIND && app.WIND.length() > 0.05 && app.WIND.length() < 6 && Math.abs(app.WIND.y) < 0.01;
 
-  // --- contract: thrown items fly ballistically (vel consumed by integrator)
+  // --- contract: thrown items fly ballistically (vel consumed by integrator).
+  // Gate on SIM state, not wall time — under SwiftShader the page may render
+  // at a couple of fps, so wall-clock waits see almost no integration.
   const item = app.fireworks.createItem('rocketSmall');
   item.root.position.set(0, 3, -6);
   item.state = 'lying';       // what release() leaves an unlit item in
   item.fallVel = -0.01;       // legacy "integrator owns this" sentinel
   item.vel = new app.THREE.Vector3(4, 2, 0);
   item.angVel = new app.THREE.Vector3(0, 0, 6);
-  const x0 = item.root.position.x, y0 = item.root.position.y;
-  const t0 = performance.now();
-  await new Promise((res) => setTimeout(res, 700));
-  const dtReal = (performance.now() - t0) / 1000;
-  out.throwDx = item.root.position.x - x0;
-  out.throwMovedHorizontally = out.throwDx > 1.2; // ~4 m/s * 0.7 s minus drag
-  out.throwFellOrLanded = item.root.position.y < y0 + 2.2 * dtReal;
+  const x0 = item.root.position.x, z0 = item.root.position.z;
+  await new Promise((res) => {
+    let n = 0;
+    const iv = setInterval(() => {
+      if (!item.vel || ++n > 600) { clearInterval(iv); res(); }
+    }, 100);
+  });
+  out.throwDx = Math.hypot(item.root.position.x - x0, item.root.position.z - z0);
+  out.throwMovedHorizontally = out.throwDx > 1.5; // a 4 m/s lob lands ~2.5-3.5 m out
+  out.throwCameToRest = !item.vel && item.root.position.y < 1.5;
 
   // --- light-count stability + budget snapshot (t=now)
   const countLights = () => {

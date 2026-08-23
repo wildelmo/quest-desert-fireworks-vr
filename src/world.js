@@ -1169,12 +1169,14 @@ function buildMesas(scene) {
   const APRON_Y = -55; // below any possible dune hollow on the sightline
   const positions = [];
   const colors = [];
+  // albedos kept low and red-biased: in full moonlight + ACES anything
+  // brighter reads as chalky concrete instead of shadowed umber rock
   const strata = [
-    new THREE.Color(0x6b4a33), // dusted plateau top
-    new THREE.Color(0x5a3c2b), // cliff brow
-    new THREE.Color(0x4e372a), // cliff body
-    new THREE.Color(0x413127), // talus
-    new THREE.Color(0x362a22), // apron
+    new THREE.Color(0x54382a), // dusted plateau top
+    new THREE.Color(0x462e23), // cliff brow
+    new THREE.Color(0x3d2b20), // cliff body
+    new THREE.Color(0x33261d), // talus
+    new THREE.Color(0x2a2019), // apron
   ];
   const cTmp = new THREE.Color();
   const pushV = (v, col) => {
