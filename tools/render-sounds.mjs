@@ -57,6 +57,12 @@ const files = await page.evaluate(async (wanted) => {
     fountain: (s) => synth.renderFountainLoop(ctx, s),
     torch: (s) => synth.renderTorchLoop(ctx, s),
     wind: (s) => synth.renderWindLoop(ctx, s),
+    rustle: (s) => synth.renderRustle(ctx, s),
+    crunch: (s) => synth.renderCrunch(ctx, s),
+    knock: (s) => synth.renderKnock(ctx, s),
+    swing: (s) => synth.renderSwing(ctx, s),
+    whistle: (s) => synth.renderWhistle(ctx, s),
+    creak: (s) => synth.renderCreak(ctx, s),
   };
 
   const toWav = (buf) => {

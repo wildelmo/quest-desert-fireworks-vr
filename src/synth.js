@@ -1109,6 +1109,299 @@ export function renderTick(ctx, seed = 1) {
 }
 
 // ---------------------------------------------------------------------------
+// Prop foley bank — the hand-scale sounds (crate handling, stakes, torch
+// swings, box knocks). Same laws as the pyro: every contact is shaped
+// noise, resonators only where a real cavity actually rings (knock, creak)
+// and then at wooden Q, buffers kept tiny — these live in the hands.
+
+// Paper/cardboard rustle — handling a shell wrap or crate flap. Physics:
+// paper moving is a chain of micro-buckling events — each crease snaps
+// through in under 2 ms and radiates one bright click — riding a broadband
+// friction hiss that swells with every hand move. Two-three distinct moves
+// per take so it reads as handling, not steady static.
+export function renderRustle(ctx, seed = 1) {
+  const sr = ctx.sampleRate;
+  const dur = 0.72;
+  const N = Math.floor(dur * sr);
+  const rand = mulberry32(seed * 20101 + 11);
+  const M = new Float32Array(N);
+  // 2-3 hand moves: soft humps the whole texture rides. The first is
+  // pinned near t=0 — this plays on grab, and a grab that answers 200 ms
+  // late reads as broken, not casual.
+  const nm = 2 + (rand() * 2 | 0);
+  const step = (dur * 0.8) / nm;
+  const moves = [];
+  for (let m = 0; m < nm; m++) {
+    moves.push({ at: 0.02 + m * step + rand() * step * 0.35, w: 0.11 + rand() * 0.13 });
+  }
+  const env = (t) => {
+    let e = 0.05; // faint contact bed between moves
+    for (const mv of moves) {
+      const u = (t - mv.at) / mv.w;
+      if (u > 0 && u < 1) e = Math.max(e, Math.pow(Math.sin(Math.PI * u), 1.6));
+    }
+    return e;
+  };
+  // friction hiss: 900 Hz - 5.2 kHz band, gated by the moves
+  let lo = 0, hi = 0;
+  const aLo = lpCoef(5200, sr), aHi = lpCoef(900, sr);
+  for (let i = 0; i < N; i++) {
+    const x = rand() * 2 - 1;
+    lo = aLo * lo + (1 - aLo) * x;
+    hi = aHi * hi + (1 - aHi) * x;
+    M[i] = (lo - hi) * env(i / sr) * 0.42;
+  }
+  // crease snaps: Poisson micro-clicks, only while a move is in progress
+  let t = 0.02;
+  while (t < dur - 0.03) {
+    t += -Math.log(1 - rand()) / 150;
+    const e = env(t);
+    if (e < 0.16) continue; // creases only happen while the hand moves
+    const i0 = Math.floor(t * sr);
+    if (i0 >= N) break;
+    const tau = 0.0007 + rand() * 0.0016;
+    const f = 1800 + rand() * 4400;
+    const aL = lpCoef(f, sr), aH = lpCoef(f * 0.35, sr);
+    const amp = (0.35 + rand() * 0.8) * e;
+    let l2 = 0, h2 = 0;
+    const len = Math.min(N - i0, Math.floor(tau * 7 * sr));
+    for (let k = 0; k < len; k++) {
+      const xx = rand() * 2 - 1;
+      l2 = aL * l2 + (1 - aL) * xx;
+      h2 = aH * h2 + (1 - aH) * xx;
+      M[i0 + k] += (l2 - h2) * Math.exp(-(k / sr) / tau) * amp;
+    }
+  }
+  normalize([M], 0.5);
+  return toBuffer(ctx, [M], sr);
+}
+
+// Stick pushed into coarse sand — the detonator stake, a mortar re-set.
+// Physics: grain jamming — hundreds of micro stick-slip fractures as the
+// grains lock and shear (a dense 1.5-5 kHz crush whose event rate dies as
+// the stick stops) over a damped LF push from the ground taking the load,
+// with a 300-1100 Hz shear grind between them. Body first, fizz on top —
+// a crunch with no low half is just a click.
+export function renderCrunch(ctx, seed = 1) {
+  const sr = ctx.sampleRate;
+  const dur = 0.38;
+  const N = Math.floor(dur * sr);
+  const rand = mulberry32(seed * 24239 + 29);
+  const M = new Float32Array(N);
+  // ground push + mid grind, one pass: both rise a few ms, decay together
+  let lp = 0, glo = 0, ghi = 0;
+  const aTh = lpCoef(230, sr);
+  const aGl = lpCoef(1100, sr), aGh = lpCoef(300, sr);
+  for (let i = 0; i < N; i++) {
+    const t = i / sr;
+    const x = rand() * 2 - 1;
+    lp = aTh * lp + (1 - aTh) * x;
+    glo = aGl * glo + (1 - aGl) * x;
+    ghi = aGh * ghi + (1 - aGh) * x;
+    const rise = Math.min(1, t / 0.008);
+    M[i] = lp * rise * Math.exp(-t / 0.055) * 2.6
+      + (glo - ghi) * rise * Math.exp(-t / 0.09) * 0.75;
+  }
+  // grain crush: Poisson micro-snaps, ~1400/s at contact dying to nothing
+  let t = 0.002;
+  while (t < dur) {
+    t += -Math.log(1 - rand()) / (90 + 1400 * Math.exp(-t * 14));
+    const i0 = Math.floor(t * sr);
+    if (i0 >= N) break;
+    const tau = 0.0005 + rand() * 0.0016;
+    const f = 1500 + rand() * 3500;
+    const aL = lpCoef(f, sr), aH = lpCoef(f * 0.3, sr);
+    const amp = (0.25 + rand() * 0.65) * Math.exp(-t * 7);
+    let lo = 0, hi = 0;
+    const len = Math.min(N - i0, Math.floor(tau * 7 * sr));
+    for (let k = 0; k < len; k++) {
+      const xx = rand() * 2 - 1;
+      lo = aL * lo + (1 - aL) * xx;
+      hi = aH * hi + (1 - aH) * xx;
+      M[i0 + k] += (lo - hi) * Math.exp(-(k / sr) / tau) * amp;
+    }
+  }
+  normalize([M], 0.65);
+  return toBuffer(ctx, [M], sr);
+}
+
+// Hollow wood / cardboard knock — knuckles on the TNT box or a crate lid.
+// Physics: the impact itself is a lowpassed thump (skin, not box); the
+// "hollow" is the cavity answering on one low mode plus a weak inharmonic
+// second. Wooden Q only (τ ≈ 50 ms — the groan precedent): tighter rings
+// like a marimba bar, and a knock is over in a tenth of a second.
+export function renderKnock(ctx, seed = 1) {
+  const sr = ctx.sampleRate;
+  const dur = 0.22;
+  const N = Math.floor(dur * sr);
+  const rand = mulberry32(seed * 30011 + 17);
+  const M = new Float32Array(N);
+  // impact thump, kept as the resonator drive too
+  const drive = new Float32Array(Math.floor(0.012 * sr));
+  {
+    let lp = 0;
+    const a = lpCoef(500, sr);
+    for (let i = 0; i < drive.length; i++) {
+      lp = a * lp + (1 - a) * (rand() * 2 - 1);
+      drive[i] = lp * Math.exp(-(i / sr) / 0.004);
+    }
+  }
+  // cavity answer: two damped modes rung by the thump. A low two-pole has
+  // enormous drive-dependent gain, so ring first, measure, then scale —
+  // clipping the raw ring flattens the knock into a held square (the same
+  // trap the groan documents).
+  const f0 = 115 + rand() * 75;
+  const ring = new Float32Array(N);
+  const modes = [[f0, 1.0, 0.05], [f0 * (2.3 + rand() * 0.6), 0.22, 0.024]];
+  let rawPeak = 1e-6;
+  for (const [fm, g, tau] of modes) {
+    const r = Math.exp(-1 / (tau * sr));
+    const th = TWO_PI * fm / sr;
+    let y1 = 0, y2 = 0;
+    for (let i = 0; i < N; i++) {
+      const y = 2 * r * Math.cos(th) * y1 - r * r * y2 + (i < drive.length ? drive[i] : 0);
+      y2 = y1; y1 = y;
+      ring[i] += y * g;
+      const ab = Math.abs(ring[i]);
+      if (ab > rawPeak) rawPeak = ab;
+    }
+  }
+  // thump on top of the scaled ring, gentle glue, die inside the buffer
+  for (let i = 0; i < N; i++) {
+    const t = i / sr;
+    const x = (ring[i] / rawPeak) * 1.05 + (i < drive.length ? drive[i] * 2.2 : 0);
+    M[i] = softClip(x, 1.25) * Math.exp(-Math.max(0, t - 0.02) / 0.055);
+  }
+  normalize([M], 0.6);
+  return toBuffer(ctx, [M], sr);
+}
+
+// Torch swing — a short air whoosh. Physics: the flame head dragged
+// through air is turbulence whose loudness AND brightness rise with tip
+// speed (a swish is a brightness event — same law as the pinwheel), on a
+// hump that eases in and decelerates into the catch, with the flame's own
+// slow flutter riding it.
+export function renderSwing(ctx, seed = 1) {
+  const sr = ctx.sampleRate;
+  const dur = 0.42;
+  const N = Math.floor(dur * sr);
+  const rand = mulberry32(seed * 40093 + 53);
+  const M = new Float32Array(N);
+  const peak = 0.38 + rand() * 0.16; // where the arc is fastest
+  let lp = 0, lp2 = 0, hp = 0, flut = 0;
+  const aHp = lpCoef(240, sr);
+  const aFl = lpCoef(26, sr);
+  const flutSteady = Math.sqrt((1 - aFl) / ((1 + aFl) * 3));
+  for (let i = 0; i < N; i++) {
+    const u = (i / sr) / dur;
+    // tip speed: slow wind-up, brisk recede
+    const v = u < peak ? Math.pow(u / peak, 1.7)
+      : Math.pow(Math.max(0, 1 - (u - peak) / (1 - peak)), 1.35);
+    const x = rand() * 2 - 1;
+    const a = lpCoef(480 + 2700 * v, sr); // brightness rides the speed
+    lp = a * lp + (1 - a) * x;
+    lp2 = a * lp2 + (1 - a) * lp;
+    hp = aHp * hp + (1 - aHp) * x;
+    flut = aFl * flut + (1 - aFl) * x;
+    const mod = 0.72 + 0.28 * Math.min(2.2, Math.abs(flut / flutSteady));
+    M[i] = (lp2 - hp) * (0.08 + v) * mod * 1.6;
+  }
+  normalize([M], 0.5);
+  return toBuffer(ctx, [M], sr);
+}
+
+// Firework riser whistle. Physics: whistle mix burning in a tube is an
+// organ pipe whose resonating gas column LENGTHENS as the charge burns
+// down, so pitch falls through the flight; combustion is unsteady, so
+// pitch and level both warble at ~9-14 Hz, deepening as the motor dies.
+// Tone is a slightly-saturated sine + weak partials with breath noise
+// tracking the fundamental — a bare sine reads as a test oscillator. (The
+// no-resonator law targets transients; a 2 s sustained tone IS the event.)
+// Seeds land the three variants at ~1.7/2.2/2.7 s.
+export function renderWhistle(ctx, seed = 1) {
+  const sr = ctx.sampleRate;
+  const rand = mulberry32(seed * 50021 + 71);
+  const dur = 1.6 + ((seed - 1) % 3) * 0.5 + rand() * 0.25;
+  const N = Math.floor(dur * sr);
+  const M = new Float32Array(N);
+  const f0 = 2350 + rand() * 650; // shriek start
+  const f1 = 780 + rand() * 220;  // dying moan
+  let phase = 0, vib = 0, drift = 0, bn = 0, bh = 0;
+  const aDrift = lpCoef(1.3, sr); // slow random pitch wander
+  const driftSteady = Math.sqrt((1 - aDrift) / ((1 + aDrift) * 3));
+  const vibHz = 9 + rand() * 4;
+  for (let i = 0; i < N; i++) {
+    const t = i / sr;
+    const u = t / dur;
+    // exponential glide, holding early and falling harder late
+    const glide = Math.pow(f1 / f0, Math.pow(u, 1.15));
+    drift = aDrift * drift + (1 - aDrift) * (rand() * 2 - 1);
+    vib += TWO_PI * (vibHz + 3 * u) / sr;
+    const depth = 0.006 + 0.045 * u * u; // warble deepens as it dies
+    const f = f0 * glide * (1 + depth * Math.sin(vib) + 0.01 * (drift / driftSteady) * u);
+    phase += TWO_PI * f / sr;
+    // breath: narrow noise band riding the fundamental
+    const aB = lpCoef(f * 1.15, sr), aH = lpCoef(f * 0.6, sr);
+    const x = rand() * 2 - 1;
+    bn = aB * bn + (1 - aB) * x;
+    bh = aH * bh + (1 - aH) * x;
+    // envelope: 30 ms attack, easy sustain, spent-motor die-off
+    const env = Math.min(1, t / 0.03)
+      * (u < 0.86 ? 1 : Math.pow(Math.max(0, 1 - (u - 0.86) / 0.14), 1.6))
+      * (1 - 0.22 * u);
+    const tremolo = 1 - (0.10 + 0.22 * u) * (0.5 + 0.5 * Math.sin(vib - 0.9));
+    const tone = softClip(
+      Math.sin(phase) + 0.16 * Math.sin(2 * phase) + 0.05 * Math.sin(3 * phase), 1.35);
+    M[i] = (tone * 0.85 + (bn - bh) * 0.5) * env * tremolo;
+  }
+  normalize([M], 0.55);
+  return toBuffer(ctx, [M], sr);
+}
+
+// Wood creak — the detonator handle or a crate lid easing over. Physics:
+// stick-slip at a dry wooden joint — friction pulses at a decelerating
+// 16→7 Hz feeding a small wooden mode that settles DOWN a little as the
+// joint gives. The colossus groan's law, two octaves lighter and a tenth
+// the mass; same measure-then-scale pass so the ring can't clip flat.
+export function renderCreak(ctx, seed = 1) {
+  const sr = ctx.sampleRate;
+  const dur = 0.8;
+  const N = Math.floor(dur * sr);
+  const rand = mulberry32(seed * 60013 + 91);
+  const M = new Float32Array(N);
+  const f0 = 310 + rand() * 130; // start of the complaint
+  const f1 = 180 + rand() * 60;  // where it settles
+  let y1 = 0, y2 = 0, b = 0, lp = 0, slipPhase = rand();
+  const aDrv = lpCoef(1300, sr);
+  let rawPeak = 1e-6;
+  for (let i = 0; i < N; i++) {
+    const t = i / sr;
+    const n = t / dur;
+    // stick-slip gate: soft pulse train decelerating as the joint grabs
+    slipPhase += (16 - 9 * n) / sr;
+    const g = Math.pow(0.5 + 0.5 * Math.sin(TWO_PI * slipPhase), 3.5);
+    b = b * 0.993 + (rand() * 2 - 1) * 0.07;
+    lp = aDrv * lp + (1 - aDrv) * b;
+    const drive = lp * (0.2 + 0.8 * g) * 0.01;
+    const fc = f0 + (f1 - f0) * Math.min(1, n * 1.3);
+    const r = 0.9905; // wooden, not violin
+    const th = TWO_PI * fc / sr;
+    const y = 2 * r * Math.cos(th) * y1 - r * r * y2 + drive;
+    y2 = y1; y1 = y;
+    M[i] = y;
+    const ab = Math.abs(y);
+    if (ab > rawPeak) rawPeak = ab;
+  }
+  for (let i = 0; i < N; i++) {
+    const t = i / sr;
+    const env = Math.min(1, t / 0.06) * Math.exp(-Math.max(0, t - 0.5) / 0.12);
+    M[i] = softClip((M[i] / rawPeak) * 1.2, 1.1) * env;
+  }
+  normalize([M], 0.45);
+  return toBuffer(ctx, [M], sr);
+}
+
+// ---------------------------------------------------------------------------
 // Impulse response for the shared reverb: wide-open desert with distant
 // rock faces — sparse discrete slapbacks plus a soft diffuse tail.
 export function renderDesertIR(ctx) {

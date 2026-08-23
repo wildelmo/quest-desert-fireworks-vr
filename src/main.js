@@ -10,6 +10,7 @@ import { FireworksSystem } from './fireworks.js';
 import { createWorld } from './world.js';
 import { COLOSSUS_POS } from './colossus.js';
 import { Interactions, XRHand, DesktopControls } from './input.js';
+import { WIND } from './wind.js';
 import { randRange, randPick, clamp } from './utils.js';
 
 const params = new URLSearchParams(location.search);
@@ -88,37 +89,62 @@ async function checkVR() {
       return;
     }
   } catch { /* fall through */ }
-  btnVR.textContent = 'VR not available here';
+  // no headset: don't park a dead green button front and center — promote
+  // desktop to the primary action and say where the real thing lives
+  btnVR.hidden = true;
+  btnDesktop.classList.add('primary');
+  btnDesktop.textContent = 'Explore the Desert';
+  document.getElementById('vr-note').hidden = false;
 }
 checkVR();
 
 btnVR.addEventListener('click', async () => {
   try {
-    await audio.init();
+    btnVR.disabled = true;
+    btnVR.textContent = 'Entering…';
+    // requestSession FIRST, while the click's transient activation is fresh —
+    // synthesizing the sample library can take long enough on a slow CPU to
+    // lose the user-gesture window. Audio builds while the headset fades up.
+    // no 'hand-tracking': XRHand only implements controller input, and a
+    // requested-but-dead feature strands hands-only players in a frozen void.
+    // Ask again when pinch-grab actually exists.
     xrSession = await navigator.xr.requestSession('immersive-vr', {
-      optionalFeatures: ['local-floor', 'bounded-floor', 'hand-tracking'],
+      optionalFeatures: ['local-floor', 'bounded-floor'],
     });
+    audio.init().then(() => { if (xrSession) audio.setActive(true); });
     xrSession.addEventListener('end', () => {
       xrSession = null;
       overlay.classList.remove('hidden');
+      btnVR.disabled = false;
       btnVR.textContent = 'Start VR';
       // back at the menu: don't leave desert wind playing in the flat tab
       audio.setActive(false);
+      floorOffset = 0;
+      floorCheck = 0;
+      attractStart();
     });
+    attractStop();
+    floorOffset = 0;
+    floorCheck = 2.0;
     await renderer.xr.setSession(xrSession);
     overlay.classList.add('hidden');
-    audio.setActive(true);
   } catch (err) {
     console.error('Failed to start VR session:', err);
+    btnVR.disabled = false;
     btnVR.textContent = 'VR failed to start';
     audio.setActive(false);
   }
 });
 
 async function startDesktop(withPointerLock) {
-  await audio.init();
-  audio.setActive(true);
+  attractStop();
+  // drop the player in immediately; the sample library synthesizes in the
+  // background and the wind fades up whenever it's ready
   overlay.classList.add('hidden');
+  audio.init().then(() => {
+    if (!overlay.classList.contains('hidden')) return; // bailed back to menu
+    audio.setActive(true);
+  });
   if (params.get('demo')) return; // spectator mode: no controls fighting the orbit
   if (!interactions.desktop) {
     interactions.desktop = new DesktopControls(interactions);
@@ -148,6 +174,7 @@ interactions.onExit = () => {
     document.exitPointerLock?.();
     overlay.classList.remove('hidden');
     audio.setActive(false);
+    attractStart();
   }
   setTimeout(() => { try { window.close(); } catch { /* not script-opened */ } }, 500);
 };
@@ -159,6 +186,65 @@ document.addEventListener('visibilitychange', () => {
     audio.setActive(true);
   }
 });
+
+// ---------------------------------------------------------------------------
+// attract mode: while the menu is up, the desert plays behind the glass —
+// a slow pan and the odd far-off shell, so the first thing a player sees is
+// the game selling itself, not a wall of text over a black void.
+
+const attract = {
+  enabled: !params.get('demo') && !params.get('autostart'),
+  active: false,
+  next: 2.5,
+  baseYaw: 0,
+};
+
+function attractStart() {
+  if (!attract.enabled) return;
+  attract.active = true;
+  attract.next = 2.0;
+  attract.baseYaw = player.rotation.y;
+  camera.rotation.x = 0.35;             // tilt up enough to catch the breaks
+}
+
+function attractStop() {
+  if (!attract.active) return;
+  attract.active = false;
+  player.rotation.y = attract.baseYaw;  // hand the rig back where it started
+  camera.rotation.x = 0;
+}
+
+function attractUpdate(dt) {
+  player.rotation.y += dt * 0.012;      // barely-perceptible pan
+  attract.next -= dt;
+  if (attract.next > 0) return;
+  attract.next = randRange(3.5, 6.5);
+  // aerial-weighted and far enough out that the breaks land in the visible
+  // frame under the menu card, never a prop poking into the near field
+  const type = randPick(['rocketMed', 'rocketMed', 'rocketLarge', 'rocketLarge', 'rocketGrand', 'rocketSmall', 'cake']);
+  spawnFieldFirework(type, 70, 140, 30);
+}
+
+// plant + light a firework somewhere in the camera's forward field
+function spawnFieldFirework(type, rMin, rMax, spread) {
+  const item = fireworks.createItem(type);
+  _demoFwd.set(0, 0, -1).applyQuaternion(camera.getWorldQuaternion(_demoQ));
+  _demoFwd.y = 0;
+  if (_demoFwd.lengthSq() < 0.01) _demoFwd.set(0, 0, -1);
+  _demoFwd.normalize();
+  const r = randRange(rMin, rMax);
+  const s = randRange(-spread, spread);
+  const x = player.position.x + _demoFwd.x * r - _demoFwd.z * s;
+  const z = player.position.z + _demoFwd.z * r + _demoFwd.x * s;
+  item.root.position.set(x, terrainHeight(x, z), z);
+  item.root.rotateOnWorldAxis(
+    new THREE.Vector3(randRange(-1, 1), 0, randRange(-1, 1)).normalize(),
+    randRange(0, 0.3),
+  );
+  item.state = 'planted';
+  item.ignite();
+  return item;
+}
 
 // ---------------------------------------------------------------------------
 // demo mode: the desert entertains itself
@@ -186,22 +272,8 @@ function demoUpdate(dt, time) {
   if (demo.next <= 0) {
     demo.next = randRange(1.6, 3.2);
     const type = randPick(['rocketSmall', 'rocketMed', 'rocketMed', 'rocketLarge', 'rocketLarge', 'rocketGrand', 'cake', 'fountain', 'candle', 'pinwheel', 'pinwheel', 'belt', 'belt']);
-    const item = fireworks.createItem(type);
     // spawn in front of wherever the camera actually faces
-    _demoFwd.set(0, 0, -1).applyQuaternion(camera.getWorldQuaternion(_demoQ));
-    _demoFwd.y = 0;
-    if (_demoFwd.lengthSq() < 0.01) _demoFwd.set(0, 0, -1);
-    _demoFwd.normalize();
-    const r = randRange(7, 18);
-    const x = player.position.x + _demoFwd.x * r - _demoFwd.z * randRange(-8, 8);
-    const z = player.position.z + _demoFwd.z * r + _demoFwd.x * randRange(-8, 8);
-    item.root.position.set(x, terrainHeight(x, z), z);
-    item.root.rotateOnWorldAxis(
-      new THREE.Vector3(randRange(-1, 1), 0, randRange(-1, 1)).normalize(),
-      randRange(0, 0.3),
-    );
-    item.state = 'planted';
-    item.ignite();
+    spawnFieldFirework(type, 7, 18, 8);
   }
   if (demo.orbit) {
     player.rotation.y += dt * 0.02;
@@ -214,7 +286,10 @@ if (params.get('autostart') === 'desktop' || params.get('demo')) {
 }
 
 // expose for tests / tinkering
-window.__app = { scene, camera, player, renderer, fireworks, world, audio, pool, interactions, THREE };
+window.__app = { scene, camera, player, renderer, fireworks, world, audio, pool, interactions, WIND, THREE };
+
+// the menu is up on load: let the desert perform behind it
+attractStart();
 
 // ---------------------------------------------------------------------------
 // frame loop
@@ -222,20 +297,38 @@ window.__app = { scene, camera, player, renderer, fireworks, world, audio, pool,
 const clock = new THREE.Clock();
 const _headWorld = new THREE.Vector3();
 let time = 0;
+let floorOffset = 0;  // rig lift when the runtime lacks a floor reference
+let floorCheck = 0;   // countdown to the one-shot head-height sanity sample
 
 renderer.setAnimationLoop(() => {
   const dt = Math.min(clock.getDelta(), 0.05);
   time += dt;
 
-  // keep the rig glued to the dunes under the head
+  // keep the rig glued to the dunes under the head. Small steps are
+  // rate-capped so dune-walking reads as gentle swell, not head bob; big
+  // jumps (teleports) still snap at full lerp speed.
   camera.getWorldPosition(_headWorld);
-  const targetY = terrainHeight(_headWorld.x, _headWorld.z);
-  player.position.y += (targetY - player.position.y) * Math.min(1, dt * 12);
+  const targetY = terrainHeight(_headWorld.x, _headWorld.z) + floorOffset;
+  let dy = (targetY - player.position.y) * Math.min(1, dt * 12);
+  if (Math.abs(targetY - player.position.y) < 2) {
+    dy = clamp(dy, -2.2 * dt, 2.2 * dt);
+  }
+  player.position.y += dy;
+
+  // floor-reference fallback: if the runtime refused 'local-floor', head
+  // poses arrive near y=0 and the player's eyes end up in the sand. Sample
+  // the local head height a moment into the session; if it's implausibly
+  // low for a tracked human, lift the rig by a standing eye height.
+  if (renderer.xr.isPresenting && floorCheck > 0) {
+    floorCheck -= dt;
+    if (floorCheck <= 0 && camera.position.y < 0.5) floorOffset = 1.6;
+  }
 
   world.update(dt, time);
   fireworks.update(dt, time);
   interactions.update(dt, time);
   if (demo) demoUpdate(dt, time);
+  if (attract.active) attractUpdate(dt);
 
   // gl_PointSize is in framebuffer pixels — in XR that's the eye buffer,
   // not the mirror canvas
@@ -247,6 +340,7 @@ renderer.setAnimationLoop(() => {
     fbHeight = layer?.framebufferHeight ?? layer?.textureHeight ?? fbHeight;
   }
   pool.update(time, fbWidth, fbHeight);
+  world.setViewport?.(fbWidth, fbHeight);
   audio.updateListener(renderer.xr.isPresenting ? renderer.xr.getCamera() : camera);
 
   renderer.render(scene, camera);

@@ -2,7 +2,8 @@
 // a textured moon, distant mountain silhouettes and occasional shooting stars.
 
 import * as THREE from 'three';
-import { mulberry32 } from './utils.js';
+import { mulberry32, clamp } from './utils.js';
+import { CELL } from './particles.js';
 
 const SKY_RADIUS = 1500;
 
@@ -13,10 +14,17 @@ function createSkyDome() {
     depthWrite: false,
     fog: false,
     uniforms: {
-      topColor: { value: new THREE.Color(0x02030a) },
-      midColor: { value: new THREE.Color(0x0a1026) },
-      horizonColor: { value: new THREE.Color(0x2a2030) },
-      glowColor: { value: new THREE.Color(0x4a3220) },
+      // linear-light values chosen so the ACES+sRGB output pipe reproduces
+      // the pre-tonemap night exactly (solved numerically, not eyeballed) —
+      // raw-writing linear colors into an sRGB buffer was crushing the
+      // gradient into a handful of banded near-black codes
+      topColor: { value: new THREE.Color(0x060709) },
+      midColor: { value: new THREE.Color(0x090b13) },
+      horizonColor: { value: new THREE.Color(0x151117) },
+      glowColor: { value: new THREE.Color(0x221811) },
+      uMoonDir: { value: MOON_DIR.clone() },
+      uPulse: { value: 0 },
+      uWash: { value: new THREE.Color(1, 1, 1) },
     },
     vertexShader: /* glsl */`
       varying vec3 vDir;
@@ -30,6 +38,8 @@ function createSkyDome() {
     fragmentShader: /* glsl */`
       varying vec3 vDir;
       uniform vec3 topColor, midColor, horizonColor, glowColor;
+      uniform vec3 uMoonDir, uWash;
+      uniform float uPulse;
       void main() {
         float h = clamp(vDir.y, -0.05, 1.0);
         vec3 col = mix(midColor, topColor, smoothstep(0.12, 0.7, h));
@@ -37,7 +47,18 @@ function createSkyDome() {
         // dusty warm glow hugging the horizon
         float glow = pow(clamp(1.0 - h * 6.0, 0.0, 1.0), 2.5);
         col += glowColor * glow * 0.5;
+        // the moon hangs in a wide cool halo, not on flat black: a tight
+        // gradient around it plus a very broad sky-brightening toward it
+        float md = max(dot(normalize(vDir), uMoonDir), 0.0);
+        col += vec3(0.040, 0.047, 0.065) * (pow(md, 18.0) * 0.85 + pow(md, 4.0) * 0.12);
+        // big bursts wash the vault: strongest in the horizon dust, a
+        // whisper at the zenith
+        col += uPulse * (0.15 + 0.85 * glow) * uWash;
+        // ordered dither: one LSB of noise breaks the gradient's contours
+        col += (fract(sin(dot(gl_FragCoord.xy, vec2(12.9898,78.233))) * 43758.5453) - 0.5) / 255.0;
         gl_FragColor = vec4(col, 1.0);
+        #include <tonemapping_fragment>
+        #include <colorspace_fragment>
       }
     `,
   });
@@ -139,6 +160,7 @@ function createStars() {
     uniforms: {
       uTime: { value: 0 },
       uMap: { value: starSprite() },
+      uPxScale: { value: 1 },
     },
     vertexShader: /* glsl */`
       attribute float aSize;
@@ -146,13 +168,18 @@ function createStars() {
       varying vec3 vColor;
       varying float vTwinkle;
       uniform float uTime;
+      uniform float uPxScale;
       void main() {
         vColor = color;
         vTwinkle = 0.75 + 0.25 * sin(uTime * (0.5 + fract(aPhase) * 2.0) + aPhase * 7.0);
         vec4 mv = modelViewMatrix * vec4(position, 1.0);
         gl_Position = projectionMatrix * mv;
         gl_Position.z = gl_Position.w * 0.9999;
-        gl_PointSize = aSize;
+        // gl_PointSize is eye-buffer pixels: the sizes are authored for a
+        // 1080-tall buffer, so a Quest eye buffer (~2000 px) scales them up
+        // rather than shrinking every star to sub-pixel shimmer; the floor
+        // keeps the dimmest stars from vanishing between samples
+        gl_PointSize = max(aSize * uPxScale, 1.5);
       }
     `,
     fragmentShader: /* glsl */`
@@ -161,7 +188,16 @@ function createStars() {
       uniform sampler2D uMap;
       void main() {
         vec4 t = texture2D(uMap, gl_PointCoord);
-        gl_FragColor = vec4(vColor * vTwinkle, t.a);
+        vec3 col = vColor * vTwinkle;
+        // ACES+sRGB output boosts dim values hard (a 0.1 star lands ~3x
+        // brighter); this peak-keyed gain re-seats the magnitude curve so
+        // faint stars stay faint while first-magnitude ones keep their bite
+        float pk = max(col.r, max(col.g, col.b));
+        col *= 0.21 + 1.15 * pk * pk * pk * pk;
+        col += (fract(sin(dot(gl_FragCoord.xy, vec2(12.9898,78.233))) * 43758.5453) - 0.5) / 255.0;
+        gl_FragColor = vec4(col, t.a);
+        #include <tonemapping_fragment>
+        #include <colorspace_fragment>
       }
     `,
     vertexColors: true,
@@ -270,12 +306,21 @@ function bakeMilkyWayTexture(bandNormal) {
 // view and to the right, ~30 degrees up — clear of the moon, over the show.
 const CORE_DIR = new THREE.Vector3(0.4, 0.5, -0.75).normalize();
 
+// Base brightness of the Gaia band. Held down so the belt whispers behind
+// the star points rather than glowing like aurora; the altitude extinction
+// mask below (airmass eats the band near the horizon) is what lets this sit
+// higher than the old flat 0.056 without reading as a second moonrise.
+const MILKYWAY_LEVEL = 0.13;
+
 // The Milky Way itself: ESA Gaia's all-sky map — an actual image of the
 // night sky assembled from ~1.8 billion measured stars — laid over the
 // gradient dome additively, so black sky adds nothing and the band, the
 // Great Rift dust lanes and the Magellanic Clouds come through for real.
+// Returns { group, state }: state.mat lands once a texture is in, so
+// update() can breathe the band's level against the burst wash.
 function createMilkyWay(bandNormal) {
   const group = new THREE.Group();
+  const state = { mat: null };
 
   const makeDome = (tex) => {
     tex.colorSpace = THREE.SRGBColorSpace;
@@ -284,9 +329,24 @@ function createMilkyWay(bandNormal) {
       map: tex, side: THREE.BackSide, blending: THREE.AdditiveBlending,
       transparent: true, depthWrite: false, fog: false,
     });
+    mat.color.setScalar(MILKYWAY_LEVEL);
+    // altitude extinction: near the horizon the band shines through ~40
+    // airmasses of dust and dies out — and it stops the additive texture
+    // from washing the warm horizon glow with a hard galactic edge
+    mat.onBeforeCompile = (sh) => {
+      sh.vertexShader = sh.vertexShader
+        .replace('#include <common>', '#include <common>\nvarying float vAltMW;')
+        .replace('#include <begin_vertex>',
+          '#include <begin_vertex>\n  vAltMW = normalize((modelMatrix * vec4(position, 1.0)).xyz).y;');
+      sh.fragmentShader = sh.fragmentShader
+        .replace('#include <common>', '#include <common>\nvarying float vAltMW;')
+        .replace('#include <color_fragment>',
+          '#include <color_fragment>\n  diffuseColor.rgb *= smoothstep(0.015, 0.26, vAltMW);');
+    };
     const mesh = new THREE.Mesh(new THREE.SphereGeometry(SKY_RADIUS * 0.99, 48, 24), mat);
     mesh.renderOrder = -9.5; // over the dome, under the star points
     mesh.frustumCulled = false;
+    state.mat = mat;
     return mesh;
   };
 
@@ -294,10 +354,6 @@ function createMilkyWay(bandNormal) {
     'assets/textures/milkyway_gaia_4k.jpg',
     (tex) => {
       const mesh = makeDome(tex);
-      // dimmed so the band whispers behind the star points, not aurora-loud
-      // (0.28 read like a second moonrise once the show lit the basin —
-      // the real band is a faint smoke of light, so hold it to a fifth)
-      mesh.material.color.setScalar(0.056);
       // the photo is equirect in galactic coordinates, so its equator IS the
       // Milky Way; tip the sphere's pole onto the band normal shared with
       // the star scatter so both layers trace the same great circle
@@ -319,7 +375,7 @@ function createMilkyWay(bandNormal) {
     () => { group.add(makeDome(bakeMilkyWayTexture(bandNormal))); },
   );
 
-  return group;
+  return { group, state };
 }
 
 function moonTexture() {
@@ -462,9 +518,13 @@ function createMoon() {
   return group;
 }
 
+// Returns { group, washU }: washU is a shared color uniform both silhouette
+// rings add in their fragment stage, so the ridge line lifts with the
+// basin-wide burst wash instead of staying dead cardboard mid-finale.
 function createMountains() {
   // Two jagged silhouette rings at different distances.
   const group = new THREE.Group();
+  const washU = { value: new THREE.Color(0, 0, 0) };
   const make = (radius, baseH, varH, color, seed) => {
     const rand = mulberry32(seed);
     const N = 140;
@@ -495,9 +555,11 @@ function createMountains() {
     const posAttr = new Float32Array(verts);
     geo.setAttribute('position', new THREE.BufferAttribute(posAttr, 3));
     // atmospheric perspective: ridgelines dissolve slightly into the sky
-    // glow instead of cutting a hard cardboard edge against it
+    // glow instead of cutting a hard cardboard edge against it. The dissolve
+    // target must be the dome's own warm horizon tone — a cool blue lifts
+    // the ridge BRIGHTER than the sky behind it and reads as paper cutouts.
     const base = new THREE.Color(color);
-    const top = base.clone().lerp(new THREE.Color(0x232338), 0.55);
+    const top = base.clone().lerp(new THREE.Color(0x191410), 0.45);
     const cols = new Float32Array(posAttr.length);
     const cTmp = new THREE.Color();
     for (let k = 0; k < posAttr.length; k += 3) {
@@ -507,6 +569,15 @@ function createMountains() {
     }
     geo.setAttribute('color', new THREE.BufferAttribute(cols, 3));
     const mat = new THREE.MeshBasicMaterial({ vertexColors: true, fog: false, side: THREE.DoubleSide });
+    // burst wash: additive lift keyed to the vertex color so the already-
+    // brighter ridge tops answer hardest (multiplying near-black does nothing)
+    mat.onBeforeCompile = (sh) => {
+      sh.uniforms.uWash = washU;
+      sh.fragmentShader = sh.fragmentShader
+        .replace('#include <common>', '#include <common>\nuniform vec3 uWash;')
+        .replace('#include <color_fragment>',
+          '#include <color_fragment>\n  diffuseColor.rgb += uWash * (0.2 + dot(vColor.rgb, vec3(6.0)));');
+    };
     const mesh = new THREE.Mesh(geo, mat);
     mesh.frustumCulled = false;
     mesh.renderOrder = -7;
@@ -514,73 +585,110 @@ function createMountains() {
   };
   group.add(make(1250, 40, 90, 0x070911, 5));
   group.add(make(950, 25, 55, 0x0b0e18, 11));
-  return group;
+  return { group, washU };
 }
 
-// A single reusable shooting-star streak.
+// A shooting star drawn through the shared particle pool: ~26 short-lived
+// glow grains ignite in sequence along the path (velocity-stretched into a
+// continuous streak) with a brief flare where the meteor burns out. Costs
+// zero draw calls — the two old 1-px THREE.Line streaks are gone.
+const METEOR_TINTS = [
+  [1.0, 1.0, 1.0], [1.0, 1.0, 1.0],       // most are white-hot
+  [0.78, 1.0, 0.84],                      // magnesium green
+  [1.0, 0.84, 0.62],                      // sodium orange
+];
+
 class ShootingStar {
-  constructor(scene) {
-    const geo = new THREE.BufferGeometry();
-    this.positions = new Float32Array(2 * 3);
-    geo.setAttribute('position', new THREE.BufferAttribute(this.positions, 3));
-    const mat = new THREE.LineBasicMaterial({
-      color: 0xffffff, transparent: true, opacity: 0, fog: false,
-      blending: THREE.AdditiveBlending, depthWrite: false,
-    });
-    this.line = new THREE.Line(geo, mat);
-    this.line.frustumCulled = false;
-    this.line.renderOrder = -8;
-    scene.add(this.line);
-    this.t = -1;
+  constructor(pool) {
+    this.pool = pool;
     this.cooldown = 6 + Math.random() * 14;
   }
 
-  update(dt) {
-    if (this.t < 0) {
-      this.cooldown -= dt;
-      if (this.cooldown <= 0) this.begin();
-      return;
-    }
-    this.t += dt;
-    const dur = 0.7;
-    const k = this.t / dur;
-    if (k >= 1) {
-      this.t = -1;
-      this.cooldown = 8 + Math.random() * 20;
-      this.line.material.opacity = 0;
-      return;
-    }
-    const head = new THREE.Vector3().copy(this.origin).addScaledVector(this.dir, k * this.len);
-    const tail = new THREE.Vector3().copy(head).addScaledVector(this.dir, -Math.min(k * this.len, 60));
-    this.positions.set([tail.x, tail.y, tail.z, head.x, head.y, head.z]);
-    this.line.geometry.attributes.position.needsUpdate = true;
-    this.line.material.opacity = Math.sin(k * Math.PI) * 0.8;
-  }
+  update(dt, time) {
+    this.cooldown -= dt;
+    if (this.cooldown > 0) return;
+    this.cooldown = 8 + Math.random() * 20;
+    const pool = this.pool;
+    if (!pool) return;
 
-  begin() {
-    this.t = 0;
     const a = Math.random() * Math.PI * 2;
     const y = 0.45 + Math.random() * 0.4;
     const r = Math.sqrt(1 - y * y);
-    this.origin = new THREE.Vector3(Math.cos(a) * r, y, Math.sin(a) * r).multiplyScalar(SKY_RADIUS * 0.95);
-    this.dir = new THREE.Vector3(Math.random() - 0.5, -0.35 - Math.random() * 0.3, Math.random() - 0.5).normalize();
-    this.len = 250 + Math.random() * 300;
+    const R = SKY_RADIUS * 0.95;
+    const ox = Math.cos(a) * r * R, oy = y * R, oz = Math.sin(a) * r * R;
+    const dx0 = Math.random() - 0.5, dy0 = -0.35 - Math.random() * 0.3, dz0 = Math.random() - 0.5;
+    const dl = Math.hypot(dx0, dy0, dz0);
+    const dx = dx0 / dl, dy = dy0 / dl, dz = dz0 / dl;
+    const len = 250 + Math.random() * 300;
+    const dur = 0.55 + Math.random() * 0.25;
+    const speed = len / dur;
+    const tint = METEOR_TINTS[(Math.random() * METEOR_TINTS.length) | 0];
+
+    const N = 26;
+    let k = 0;
+    pool.spawn(N, (i) => {
+      const t = k++ / (N - 1);
+      // each grain ignites as the head passes it, drifts on at a fraction
+      // of meteor speed (the stretch shader smears it along that motion),
+      // and cools out behind — a long-exposure streak, not a dotted line
+      const b = 0.4 + 0.55 * t; // the head end burns brightest
+      pool.set(i,
+        ox + dx * len * t, oy + dy * len * t, oz + dz * len * t,
+        dx * speed * 0.22, dy * speed * 0.22, dz * speed * 0.22,
+        tint[0] * b, tint[1] * b, tint[2] * b,
+        time + t * dur, 0.2 + 0.16 * Math.random(),
+        4.5 + Math.random() * 2.5, 0, 0, 0,
+        CELL.GLOW, 0.28, 0);
+    });
+    // terminal flare: the pop where it burns out
+    const ex = ox + dx * len, ey = oy + dy * len, ez = oz + dz * len;
+    pool.spawn(3, (i) => {
+      const j = i % 3;
+      pool.set(i,
+        ex, ey, ez,
+        dx * 8, dy * 8, dz * 8,
+        tint[0] * 1.1, tint[1] * 1.05, tint[2],
+        time + dur, j === 2 ? 0.7 : 0.4,
+        j === 0 ? 13 : j === 1 ? 22 : 6, 0, 0, 0,
+        j === 0 ? CELL.STAR6 : CELL.GLOW, 0, 0);
+    });
   }
 }
 
-export function createSky(scene) {
+export function createSky(scene, pool = null) {
   const dome = createSkyDome();
   const stars = createStars();
   const moon = createMoon();
   const mountains = createMountains();
   const haze = createMilkyWay(BAND_NORMAL);
-  scene.add(dome, stars, haze, moon, mountains);
-  const shooters = [new ShootingStar(scene), new ShootingStar(scene)];
+  scene.add(dome, stars, haze.group, moon, mountains.group);
+  const shooters = [new ShootingStar(pool), new ShootingStar(pool)];
+
+  const du = dome.material.uniforms;
+  const su = stars.material.uniforms;
+  // the horizon/fog handshake: world.js seeds scene.fog from this so far
+  // terrain and the mesas dissolve INTO the dome's horizon band instead of
+  // fogging toward some unrelated navy (linear-light, same space fog mixes in)
+  const fogColor = du.horizonColor.value.clone().lerp(du.glowColor.value, 0.4);
 
   return {
-    update(dt, time) {
-      stars.material.uniforms.uTime.value = time;
-      for (const s of shooters) s.update(dt);
+    fogColor,
+    update(dt, time, pulse) {
+      su.uTime.value = time;
+      for (const s of shooters) s.update(dt, time);
+      // the vault answers big bursts: dome wash up, milky way politely down
+      // (the band must never fight the show for the same sky)
+      const e = pulse ? Math.min(pulse.energy, 2.6) : 0;
+      du.uPulse.value = e * 0.045;
+      if (pulse) du.uWash.value.copy(pulse.color);
+      if (pulse) mountains.washU.value.copy(pulse.color).multiplyScalar(e * 0.02);
+      const mw = haze.state.mat;
+      if (mw) mw.color.setScalar(MILKYWAY_LEVEL * (1 - 0.7 * Math.min(1, e)));
+    },
+    setViewport(fbWidth, fbHeight) {
+      // star sizes are authored in 1080-buffer pixels; rescale to the real
+      // eye buffer so stars hold their angular size across devices
+      su.uPxScale.value = clamp((fbHeight || 1080) / 1080, 1, 2.5);
     },
   };
 }

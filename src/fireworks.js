@@ -6,8 +6,9 @@
 // the terrain with color on every burst.
 
 import * as THREE from 'three';
-import { randRange, randPick, clamp } from './utils.js';
+import { randRange, randPick, clamp, mulberry32 } from './utils.js';
 import { CELL } from './particles.js';
+import { WIND } from './wind.js';
 
 // Colorways matched to a classic display photo: a huge amber-gold
 // chrysanthemum, scarlet shells with pale pink tips, teal/aqua shells (one
@@ -113,6 +114,12 @@ const _bp = new THREE.Vector3();
 const _bt = new THREE.Vector3();
 const _bn = new THREE.Vector3();
 const _bd = new THREE.Vector3();
+// fuse + item-flight scratch (item.update runs inside frames that already
+// lean on _v1.._v4)
+const _fv1 = new THREE.Vector3();
+const _fv2 = new THREE.Vector3();
+const _fv3 = new THREE.Vector3();
+const _fq = new THREE.Quaternion();
 
 // Where a drag-integrated particle will be after t seconds (matches shader).
 function ballistic(p0, v0, t, gravity, drag, out) {
@@ -200,6 +207,16 @@ const SELF_TEXTURED = new Set(['thousandbloom', 'bees', 'fish', 'dragoneggs',
 const BOUNCE_RESTITUTION = 0.42;
 const BOUNCE_DAMPING = 0.72;
 
+// Thrown items hit softer than comet stars: cardboard on sand barely skips,
+// and most of the slide dies in the grit on first contact.
+const ITEM_RESTITUTION = 0.25;
+const ITEM_FRICTION = 0.62;      // tangential speed kept per ground hit
+const ITEM_DRAG_K = 0.05;        // quadratic air drag (tumbling cardboard)
+
+// Cake tube firing order: a fixed scramble of the 3x3 grid (built row-major
+// in _buildMesh) so consecutive shots hop corners instead of marching rows.
+const CAKE_FIRE_ORDER = [4, 0, 8, 2, 6, 1, 5, 3, 7];
+
 // ---------------------------------------------------------------------------
 // Pooled burst flash lights — these are what paint the dunes with color.
 // Real bursts light the ground in two phases: a hard white-hot pop at the
@@ -219,16 +236,26 @@ class FlashPool {
         hot: new THREE.Color(), tail: new THREE.Color(),
       });
     }
-    this.cursor = 0;
   }
 
   /**
    * sink: how fast the light drifts downward (m/s) — burning stars fall,
    * and the pool of light on the sand should follow them.
+   *
+   * Slot policy: free slot first; otherwise evict whichever flash has the
+   * least light LEFT in it (peak scaled by its remaining envelope) — and
+   * refuse outright if the newcomer is dimmer than that. A grand shell's
+   * four-second afterglow can no longer be round-robined away by a volley
+   * of muzzle pops.
    */
   flash(pos, color, intensity, dur = 0.45, sink = 0) {
-    const slot = this.lights[this.cursor];
-    this.cursor = (this.cursor + 1) % this.lights.length;
+    let slot = null, weakest = Infinity;
+    for (const s of this.lights) {
+      if (s.peak === 0) { slot = s; break; }
+      const left = s.peak * Math.max(0, 1 - s.t / s.dur);
+      if (left < weakest) { weakest = left; slot = s; }
+    }
+    if (slot.peak !== 0 && intensity <= weakest) return; // dimmer than everything burning
     slot.light.position.copy(pos);
     slot.tail.set(color);
     // the break itself is nearly white; it cools into the star color
@@ -262,7 +289,7 @@ class FlashPool {
 // flare (a real streak-flare texture) — together they read like the blown-out
 // frame a camera catches at the instant of the break.
 class FlashSprites {
-  constructor(scene, count = 4) {
+  constructor(scene, count = 4, atlas = null) {
     const c = document.createElement('canvas');
     c.width = c.height = 64;
     const g = c.getContext('2d');
@@ -273,7 +300,19 @@ class FlashSprites {
     g.fillStyle = grad;
     g.fillRect(0, 0, 64, 64);
     const tex = new THREE.CanvasTexture(c);
-    const flareTex = new THREE.TextureLoader().load('assets/textures/particles/flare_01.png');
+    // the particle atlas already carries flare_01 in its FLASH cell — window
+    // a clone onto that region instead of fetching + uploading the PNG a
+    // second time (clones share the Source, so the GPU holds one copy; the
+    // streak is vertically symmetric, so the atlas's flipY=false is moot)
+    let flareTex;
+    if (atlas) {
+      flareTex = atlas.clone();
+      flareTex.offset.set(0.75, 0.5); // CELL.FLASH: col 3, row 1 of the 4x2 grid
+      flareTex.repeat.set(0.25, 0.5);
+      flareTex.needsUpdate = true;
+    } else {
+      flareTex = new THREE.TextureLoader().load('assets/textures/particles/flare_01.png');
+    }
     this.sprites = [];
     for (let i = 0; i < count; i++) {
       const s = new THREE.Sprite(new THREE.SpriteMaterial({
@@ -290,12 +329,18 @@ class FlashSprites {
       scene.add(f);
       this.sprites.push({ sprite: s, flare: f, t: 1e9, dur: 0.35, from: 2, to: 20, fw: 10 });
     }
-    this.cursor = 0;
   }
 
   burst(pos, color, size) {
-    const s = this.sprites[this.cursor];
-    this.cursor = (this.cursor + 1) % this.sprites.length;
+    // same policy as the light pool: free slot, else the most-faded one —
+    // and a small flash never steals a big one mid-bloom
+    let s = null, weakest = Infinity;
+    for (const c of this.sprites) {
+      if (!c.sprite.visible) { s = c; break; }
+      const left = c.to * Math.max(0, 1 - c.t / c.dur);
+      if (left < weakest) { weakest = left; s = c; }
+    }
+    if (s.sprite.visible && 20 * size <= weakest) return;
     s.sprite.position.copy(pos);
     s.sprite.material.color.set(color);
     s.sprite.visible = true;
@@ -333,66 +378,446 @@ class FlashSprites {
   }
 }
 
+// Pooled fuse lights: a sputtering fuse must actually light the tube and the
+// hand holding it. Four small warm points, created at startup like every
+// other light here (visible at intensity 0 — see the FlashPool note),
+// acquired on ignite() and released the moment the item activates.
+class FuseLightPool {
+  constructor(scene, count = 4) {
+    this.slots = [];
+    for (let i = 0; i < count; i++) {
+      const l = new THREE.PointLight(0xffa14e, 0, 0.9, 2.0);
+      scene.add(l);
+      this.slots.push({ light: l, owner: null, phase: Math.random() * 9 });
+    }
+  }
+
+  acquire(item) {
+    for (const s of this.slots) {
+      if (!s.owner) { s.owner = item; return s; }
+    }
+    return null; // a fifth simultaneous fuse burns unlit — sparks still sell it
+  }
+
+  release(item) {
+    for (const s of this.slots) {
+      if (s.owner === item) {
+        s.owner = null;
+        s.light.intensity = 0;
+      }
+    }
+  }
+
+  update(time) {
+    for (const s of this.slots) {
+      if (!s.owner) continue;
+      s.owner.fuseWorldPos(_v1);
+      s.light.position.copy(_v1);
+      // sputter: fast flicker with occasional near-dropouts, like a real
+      // visco fuse choking on its own powder
+      const chug = Math.sin(time * 31 + s.phase) * 0.35 + Math.sin(time * 8.7 + s.phase * 2.3) * 0.25;
+      const dropout = Math.sin(time * 3.1 + s.phase) > 0.93 ? 0.25 : 1;
+      s.light.intensity = Math.max(0.3, (1.8 + chug * 1.4) * dropout);
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Item visuals
 
-// Printed wrapper art: colored bands with gold pinstripes, a starburst
-// emblem, and fake fine print — reads "fireworks stand" at arm's length
-// instead of "colored cylinder". One texture per palette (cached above).
-function labelTexture(palette) {
-  const W = 128, H = 256;
+// Printed wrapper art, one composition per KIND: rocket wrap, cake box art,
+// candle tube, fountain cone, belt band — each printing its real type label
+// ('Mammoth Rocket'…), house branding, the caution line, a lot number and
+// palette-accented trim. 512x1024 + anisotropy so the print survives being
+// held 20 cm from the lens. Deterministic per (type, palette): the same
+// wrapper off the same press run.
+const BRAND = 'DESERT BLOOM PYRO CO.';
+const CAUTION = 'LIGHT FUSE — RETIRE QUICKLY';
+
+function labelTexture(typeName, palette) {
+  const t = ITEM_TYPES[typeName];
+  const W = 512, H = 1024;
   const c = document.createElement('canvas');
   c.width = W; c.height = H;
   const g = c.getContext('2d');
   const colA = new THREE.Color(palette.a);
   const colB = new THREE.Color(palette.b);
   const css = (col, k = 1) => `rgb(${(col.r * 255 * k) | 0},${(col.g * 255 * k) | 0},${(col.b * 255 * k) | 0})`;
+  // per-press-run determinism: lot numbers, crookedness, wear all reproduce
+  let seed = 0;
+  const key = typeName + palette.name;
+  for (let i = 0; i < key.length; i++) seed = (seed * 31 + key.charCodeAt(i)) | 0;
+  const rand = mulberry32(seed >>> 0);
+  const lot = `LOT ${((rand() * 90 + 10) | 0)}-${((rand() * 900 + 100) | 0)} · NEC 1.4G`;
 
-  // aged paper
-  g.fillStyle = '#ded2b8';
+  // aged kraft base
+  g.fillStyle = '#dcd0b4';
   g.fillRect(0, 0, W, H);
+  // the whole print sits a hair crooked on the paper, like cheap offset work
+  g.save();
+  g.translate(W / 2, H / 2);
+  g.rotate((rand() - 0.5) * 0.02);
+  g.translate(-W / 2, -H / 2);
 
-  // main bands, dark-edged like cheap offset print
-  g.fillStyle = css(colA);
-  g.fillRect(0, 12, W, 52);
-  g.fillRect(0, H - 64, W, 52);
-  g.fillStyle = css(colA, 0.55);
-  for (const y of [12, 62, H - 64, H - 14]) g.fillRect(0, y, W, 3);
-  // gold pinstripes framing the middle
-  g.fillStyle = '#c9a544';
-  g.fillRect(0, 74, W, 3);
-  g.fillRect(0, H - 78, W, 3);
+  const starburst = (cx, cy, R, lw = 5) => {
+    g.strokeStyle = css(colB, 0.85);
+    g.lineWidth = lw;
+    for (let i = 0; i < 12; i++) {
+      const a = (i / 12) * Math.PI * 2;
+      const r0 = i % 2 ? R * 0.35 : R * 0.2, r1 = i % 2 ? R : R * 0.62;
+      g.beginPath();
+      g.moveTo(cx + Math.cos(a) * r0, cy + Math.sin(a) * r0);
+      g.lineTo(cx + Math.cos(a) * r1, cy + Math.sin(a) * r1);
+      g.stroke();
+    }
+    g.fillStyle = css(colA);
+    g.beginPath(); g.arc(cx, cy, R * 0.24, 0, Math.PI * 2); g.fill();
+  };
+  const finePrint = (x0, x1, y, rows) => {
+    g.fillStyle = 'rgba(60,45,25,0.55)';
+    for (let r2 = 0; r2 < rows; r2++) {
+      for (let x = x0; x < x1; x += 22) g.fillRect(x, y + r2 * 13, 13 + ((x * 7) % 8), 4);
+    }
+  };
+  // brand + caution + lot, shared footer/header voice across every wrapper
+  const stamps = (cx, yBrand, yCaution, yLot, scale = 1) => {
+    g.textAlign = 'center';
+    g.fillStyle = '#7a2f1a';
+    g.font = `bold ${(26 * scale) | 0}px Georgia, serif`;
+    g.fillText(BRAND, cx, yBrand);
+    g.fillStyle = '#4a3517';
+    g.font = `bold ${(21 * scale) | 0}px Georgia, serif`;
+    g.fillText(CAUTION, cx, yCaution);
+    g.font = `${(18 * scale) | 0}px Georgia, serif`;
+    g.fillStyle = 'rgba(60,45,25,0.8)';
+    g.fillText(lot, cx, yLot);
+  };
+  const title = (cx, cy, size, maxW) => {
+    g.textAlign = 'center';
+    g.fillStyle = '#2e2312';
+    g.font = `bold ${size}px Georgia, serif`;
+    const words = t.label.toUpperCase().split(' ');
+    // wrap to two lines when the name runs long (SKY ROCKET fits one)
+    if (g.measureText(t.label.toUpperCase()).width > maxW && words.length > 1) {
+      const half = Math.ceil(words.length / 2);
+      g.fillText(words.slice(0, half).join(' '), cx, cy - size * 0.55, maxW);
+      g.fillText(words.slice(half).join(' '), cx, cy + size * 0.65, maxW);
+    } else {
+      g.fillText(t.label.toUpperCase(), cx, cy, maxW);
+    }
+  };
 
-  // starburst emblem in the middle panel
-  const cx = W / 2, cy = H / 2;
-  g.strokeStyle = css(colB, 0.85);
-  g.lineWidth = 3;
-  for (let i = 0; i < 12; i++) {
-    const a = (i / 12) * Math.PI * 2;
-    const r0 = i % 2 ? 12 : 7, r1 = i % 2 ? 34 : 22;
-    g.beginPath();
-    g.moveTo(cx + Math.cos(a) * r0, cy + Math.sin(a) * r0);
-    g.lineTo(cx + Math.cos(a) * r1, cy + Math.sin(a) * r1);
-    g.stroke();
+  const kind = t.kind;
+  if (kind === 'cake') {
+    // box art: framed panel, the name in lights, a 3x3 tube chart, hazard tape
+    g.fillStyle = css(colA, 0.9);
+    g.fillRect(0, 0, W, 118);
+    g.fillRect(0, H - 118, W, 118);
+    g.fillStyle = '#d8b83a';
+    for (let x = -30; x < W; x += 60) { // chevrons
+      g.beginPath();
+      g.moveTo(x, 0); g.lineTo(x + 30, 0); g.lineTo(x + 60, 34); g.lineTo(x + 30, 34); g.fill();
+      g.beginPath();
+      g.moveTo(x + 30, H - 34); g.lineTo(x + 60, H - 34); g.lineTo(x + 30, H); g.lineTo(x, H); g.fill();
+    }
+    g.strokeStyle = '#c9a544';
+    g.lineWidth = 8;
+    g.strokeRect(36, 160, W - 72, H - 320);
+    starburst(W / 2, 400, 150, 8);
+    title(W / 2, 620, 64, W - 120);
+    g.fillStyle = css(colB, 0.9);
+    g.font = 'bold 40px Georgia, serif';
+    g.fillText(`${t.shots} SHOTS · FINALE GRADE`, W / 2, 705);
+    // the tube chart: nine dots, the firing order a buyer never reads
+    g.fillStyle = css(colA, 0.7);
+    for (let ix = 0; ix < 3; ix++) {
+      for (let iz = 0; iz < 3; iz++) {
+        g.beginPath(); g.arc(W / 2 - 70 + ix * 70, 760 + iz * 46, 14, 0, Math.PI * 2); g.fill();
+      }
+    }
+    stamps(W / 2, 145, H - 140, H - 168, 1.15);
+    finePrint(70, W - 70, 895, 2);
+  } else if (kind === 'candle') {
+    // barber-pole: the classic roman candle diagonals, title run vertically
+    g.fillStyle = css(colA);
+    g.save();
+    g.beginPath(); g.rect(0, 90, W, H - 180); g.clip();
+    for (let y = -W; y < H + W; y += 108) {
+      g.beginPath();
+      g.moveTo(0, y); g.lineTo(W, y - W); g.lineTo(W, y - W + 54); g.lineTo(0, y + 54);
+      g.fill();
+    }
+    g.restore();
+    g.fillStyle = css(colB, 0.9);
+    g.fillRect(0, 90, W, 10);
+    g.fillRect(0, H - 100, W, 10);
+    // title reads down the tube, twice around so any facing shows it
+    g.fillStyle = '#f4ecd8';
+    g.font = 'bold 46px Georgia, serif';
+    g.textAlign = 'center';
+    for (const cx of [W * 0.25, W * 0.75]) {
+      g.save();
+      g.translate(cx, H / 2);
+      g.rotate(Math.PI / 2);
+      g.fillText(t.label.toUpperCase(), 0, 16, H - 400);
+      g.restore();
+    }
+    stamps(W / 2, 60, H - 62, H - 30);
+    finePrint(60, W - 60, 18, 1);
+  } else if (kind === 'belt') {
+    // the shipping band around the rolled belt: scarlet, gold lettering
+    g.fillStyle = '#a01818';
+    g.fillRect(0, 0, W, H);
+    g.fillStyle = '#7c0f0f';
+    for (let y = 0; y < H; y += 64) g.fillRect(0, y, W, 8);
+    g.fillStyle = '#e8b84a';
+    g.font = 'bold 88px Georgia, serif';
+    g.textAlign = 'center';
+    for (const cy of [H * 0.3, H * 0.72]) {
+      title(W / 2, cy, 76, W - 60);
+    }
+    g.fillStyle = '#e8b84a';
+    g.font = 'bold 40px Georgia, serif';
+    g.fillText(`${t.crackers} CRACKERS`, W / 2, H * 0.5);
+    g.fillStyle = '#f4d890';
+    g.font = 'bold 24px Georgia, serif';
+    g.fillText(BRAND, W / 2, H * 0.5 + 44);
+    g.font = 'bold 21px Georgia, serif';
+    g.fillText(CAUTION, W / 2, H * 0.5 + 76);
+    g.font = '18px Georgia, serif';
+    g.fillText(lot, W / 2, H * 0.5 + 104);
+  } else if (kind === 'fountain') {
+    // cone: bloom rays pouring from the apex, band of type at the base
+    g.fillStyle = css(colA, 0.85);
+    g.fillRect(0, 0, W, 150);
+    g.strokeStyle = css(colB, 0.8);
+    g.lineWidth = 7;
+    for (let i = 0; i < 22; i++) { // the printed spray
+      const a = Math.PI * (0.15 + 0.7 * (i / 21));
+      g.beginPath();
+      g.moveTo(W / 2, 170);
+      g.quadraticCurveTo(
+        W / 2 + Math.cos(a) * 190, 320 - Math.sin(a) * 120,
+        W / 2 + Math.cos(a) * 260, 470 - Math.sin(a) * 40,
+      );
+      g.stroke();
+    }
+    starburst(W / 2, 200, 70, 4);
+    g.fillStyle = css(colA);
+    g.fillRect(0, 520, W, 130);
+    title(W / 2, 600, 52, W - 90);
+    stamps(W / 2, 700, 745, 782);
+    finePrint(60, W - 60, 830, 3);
+    g.fillStyle = css(colB, 0.75);
+    g.fillRect(0, H - 60, W, 22);
+  } else {
+    // rocket wrap (pinwheel drivers borrow it): bands, emblem, name — the
+    // fireworks-stand classic, repeated on both faces of the wrap
+    g.fillStyle = css(colA);
+    g.fillRect(0, 40, W, 190);
+    g.fillRect(0, H - 230, W, 190);
+    g.fillStyle = css(colA, 0.55);
+    for (const y of [40, 226, H - 230, H - 44]) g.fillRect(0, y, W, 10);
+    g.fillStyle = '#c9a544';
+    g.fillRect(0, 270, W, 10);
+    g.fillRect(0, H - 282, W, 10);
+    for (const cx of [W * 0.25, W * 0.75]) {
+      starburst(cx, 420, 92, 5);
+      title(cx, 590, 44, W * 0.44);
+      g.textAlign = 'center';
+      g.fillStyle = '#7a2f1a';
+      g.font = 'bold 22px Georgia, serif';
+      g.fillText(BRAND, cx, 680, W * 0.46);
+      g.fillStyle = '#4a3517';
+      g.font = 'bold 17px Georgia, serif';
+      g.fillText(CAUTION, cx, 712, W * 0.46);
+      g.font = '15px Georgia, serif';
+      g.fillStyle = 'rgba(60,45,25,0.8)';
+      g.fillText(lot, cx, 738, W * 0.46);
+    }
+    g.fillStyle = '#f4ecd8';
+    g.font = 'bold 30px Georgia, serif';
+    g.textAlign = 'center';
+    g.fillText('★ ★ ★', W * 0.25, 145);
+    g.fillText('★ ★ ★', W * 0.75, 145);
+    finePrint(40, W - 40, 780, 2);
   }
-  g.fillStyle = css(colA);
-  g.beginPath(); g.arc(cx, cy, 8, 0, Math.PI * 2); g.fill();
+  g.restore();
 
-  // fake fine print above/below the emblem
-  g.fillStyle = 'rgba(60,45,25,0.55)';
-  for (const y of [86, 94, H - 96, H - 88]) {
-    for (let x = 14; x < W - 14; x += 10) g.fillRect(x, y, 6 + (x * 7) % 4, 2);
-  }
-
-  // wear: scuffs and a couple of scratches
+  // wear: scuffs and a couple of scratches, deterministic per run
   g.fillStyle = 'rgba(30,20,10,0.30)';
-  for (let i = 0; i < 6; i++) g.fillRect(0, (i * 47 + 23) % H, W, 1);
+  for (let i = 0; i < 9; i++) g.fillRect(0, (rand() * H) | 0, W, 2);
   g.fillStyle = 'rgba(255,250,235,0.20)';
-  for (let i = 0; i < 4; i++) g.fillRect((i * 37 + 11) % W, 0, 1, H);
+  for (let i = 0; i < 6; i++) g.fillRect((rand() * W) | 0, 0, 2, H);
 
   const tex = new THREE.CanvasTexture(c);
   tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = 8; // the print stays legible at grazing wrap angles
   return tex;
+}
+
+// Shared paper-grain surface: one procedural normal map (machine-direction
+// kraft fibers) and one roughness mottle, tiled by every wrapper material —
+// tubes read as lacquered paper under the torch instead of smooth plastic.
+let _paperMaps = null;
+function paperMaps() {
+  if (_paperMaps) return _paperMaps;
+  const S = 256;
+  const rand = mulberry32(90210);
+  // height field: per-column fiber jitter + fine grain, box-blurred once
+  const h = new Float32Array(S * S);
+  const fiber = new Float32Array(S);
+  for (let x = 0; x < S; x++) fiber[x] = rand();
+  for (let y = 0; y < S; y++) {
+    for (let x = 0; x < S; x++) {
+      h[y * S + x] = fiber[x] * 0.55 + rand() * 0.45;
+    }
+  }
+  const blur = new Float32Array(S * S);
+  for (let y = 0; y < S; y++) {
+    for (let x = 0; x < S; x++) {
+      let s = 0;
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          s += h[((y + dy + S) % S) * S + ((x + dx + S) % S)];
+        }
+      }
+      blur[y * S + x] = s / 9;
+    }
+  }
+  const nc = document.createElement('canvas');
+  nc.width = nc.height = S;
+  const ng = nc.getContext('2d');
+  const nd = ng.createImageData(S, S);
+  const AMP = 2.2;
+  for (let y = 0; y < S; y++) {
+    for (let x = 0; x < S; x++) {
+      const dhx = (blur[y * S + ((x + 1) % S)] - blur[y * S + ((x - 1 + S) % S)]) * AMP;
+      const dhy = (blur[((y + 1) % S) * S + x] - blur[((y - 1 + S) % S) * S + x]) * AMP;
+      const il = 1 / Math.hypot(dhx, dhy, 1);
+      const o = (y * S + x) * 4;
+      nd.data[o] = (-dhx * il * 0.5 + 0.5) * 255;
+      nd.data[o + 1] = (-dhy * il * 0.5 + 0.5) * 255;
+      nd.data[o + 2] = il * 255;
+      nd.data[o + 3] = 255;
+    }
+  }
+  ng.putImageData(nd, 0, 0);
+  const normal = new THREE.CanvasTexture(nc);
+  normal.wrapS = normal.wrapT = THREE.RepeatWrapping;
+  normal.repeat.set(3, 6);
+
+  const rc = document.createElement('canvas');
+  rc.width = rc.height = S;
+  const rg = rc.getContext('2d');
+  const rd = rg.createImageData(S, S);
+  for (let i = 0; i < S * S; i++) {
+    // lacquer mottle: mostly glossy (~0.4) with matte scuffed patches
+    const v = (0.40 + (blur[i] - 0.5) * 0.3 + rand() * 0.1) * 255;
+    rd.data[i * 4] = rd.data[i * 4 + 1] = rd.data[i * 4 + 2] = v;
+    rd.data[i * 4 + 3] = 255;
+  }
+  rg.putImageData(rd, 0, 0);
+  const rough = new THREE.CanvasTexture(rc);
+  rough.wrapS = rough.wrapT = THREE.RepeatWrapping;
+  rough.repeat.set(3, 6);
+
+  _paperMaps = { normal, rough };
+  return _paperMaps;
+}
+
+// Parachute canopy for illumination flares: a shallow dome as two crossed
+// bowed quads (alpha-tested panel texture) + four shroud lines down to the
+// candle. Geometry and texture built once; each flare gets its own tinted
+// material (disposed with the flare) and rides the emitter's sway path.
+let _canopyGeo = null;
+let _canopyTex = null;
+let _shroudGeo = null;
+const SHROUD_MAT = new THREE.LineBasicMaterial({ color: 0x3a3a40, fog: false });
+function makeFlareCanopy(col) {
+  if (!_canopyGeo) {
+    const quad = new THREE.PlaneGeometry(0.62, 0.30, 6, 1);
+    const p = quad.attributes.position;
+    for (let i = 0; i < p.count; i++) {
+      const x = p.getX(i);
+      p.setZ(i, -x * x * 1.1); // bow the panel into a shallow dome section
+    }
+    quad.rotateX(-Math.PI / 2);
+    const quad2 = quad.clone().rotateY(Math.PI / 2);
+    // merge by hand: two quads, one geometry (positions + uv only)
+    const g = new THREE.BufferGeometry();
+    const pa = quad.attributes, pb = quad2.attributes;
+    const join = (name, itemSize) => {
+      const a = pa[name].array, b = pb[name].array;
+      const out = new Float32Array(a.length + b.length);
+      out.set(a); out.set(b, a.length);
+      g.setAttribute(name, new THREE.BufferAttribute(out, itemSize));
+    };
+    join('position', 3);
+    join('uv', 2);
+    const ia = quad.index.array, ib = quad2.index.array;
+    const idx = new Uint16Array(ia.length + ib.length);
+    idx.set(ia);
+    const off = pa.position.count;
+    for (let i = 0; i < ib.length; i++) idx[ia.length + i] = ib[i] + off;
+    g.setIndex(new THREE.BufferAttribute(idx, 1));
+    _canopyGeo = g;
+
+    const c = document.createElement('canvas');
+    c.width = 64; c.height = 32;
+    const gg = c.getContext('2d');
+    gg.clearRect(0, 0, 64, 32);
+    gg.fillStyle = '#e8e2d0';
+    gg.beginPath(); // the scalloped arc silhouette of a small chute panel
+    gg.moveTo(2, 30);
+    gg.quadraticCurveTo(32, -14, 62, 30);
+    gg.quadraticCurveTo(47, 24, 32, 29);
+    gg.quadraticCurveTo(17, 24, 2, 30);
+    gg.closePath(); gg.fill();
+    gg.strokeStyle = 'rgba(90,80,60,0.8)'; // panel seams
+    gg.lineWidth = 1.5;
+    for (const x of [17, 32, 47]) {
+      gg.beginPath(); gg.moveTo(x, 30); gg.quadraticCurveTo(x, 8, 32, 2); gg.stroke();
+    }
+    _canopyTex = new THREE.CanvasTexture(c);
+    _canopyTex.colorSpace = THREE.SRGBColorSpace;
+
+    const pts = [];
+    for (const [sx, sz] of [[0.26, 0], [-0.26, 0], [0, 0.26], [0, -0.26]]) {
+      pts.push(sx, 0.5, sz, 0, -0.06, 0); // rim down to the candle head
+    }
+    _shroudGeo = new THREE.BufferGeometry();
+    _shroudGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(pts), 3));
+  }
+  const group = new THREE.Group();
+  const mat = new THREE.MeshBasicMaterial({
+    map: _canopyTex, alphaTest: 0.4, side: THREE.DoubleSide, fog: false,
+    color: new THREE.Color(0.55 + col[0] * 0.4, 0.55 + col[1] * 0.4, 0.55 + col[2] * 0.4),
+  });
+  const dome = new THREE.Mesh(_canopyGeo, mat);
+  dome.position.y = 0.5;
+  group.add(dome);
+  group.add(new THREE.LineSegments(_shroudGeo, SHROUD_MAT));
+  group.userData.mat = mat; // per-flare tint — dispose with the flare
+  return group;
+}
+
+// Soft round bead for fuse tips (shared by every item; sprites carry their
+// own materials for per-item opacity, but the texture is one canvas).
+let _fuseTipTex = null;
+function fuseTipTexture() {
+  if (_fuseTipTex) return _fuseTipTex;
+  const c = document.createElement('canvas');
+  c.width = c.height = 32;
+  const g = c.getContext('2d');
+  const grad = g.createRadialGradient(16, 16, 0, 16, 16, 16);
+  grad.addColorStop(0, 'rgba(255,255,255,1)');
+  grad.addColorStop(0.4, 'rgba(255,255,255,0.5)');
+  grad.addColorStop(1, 'rgba(255,255,255,0)');
+  g.fillStyle = grad;
+  g.fillRect(0, 0, 32, 32);
+  _fuseTipTex = new THREE.CanvasTexture(c);
+  return _fuseTipTex;
 }
 
 const GEO_CACHE = {};
@@ -402,19 +827,14 @@ function cachedGeo(key, make) {
 }
 
 // The restocker spawns items forever; per-item textures/materials would be an
-// unbounded GPU leak, so everything visual is cached per palette (8 entries).
+// unbounded GPU leak, so everything visual is cached — noses per palette
+// (12 entries), wrappers per (type, palette), generated lazily on the first
+// item of each combination.
 const MAT_CACHE = {};
 function paletteMats(palette) {
   let m = MAT_CACHE[palette.name];
   if (!m) {
     m = {
-      // glossy printed wrapper — the sheen is what reads "store-bought
-      // firework" instead of "painted cylinder"
-      label: new THREE.MeshStandardMaterial({
-        map: labelTexture(palette),
-        roughness: 0.38, metalness: 0, envMapIntensity: 0.7,
-        emissive: new THREE.Color(palette.a).multiplyScalar(0.14),
-      }),
       // metallic-paint nose cone: catches the moon and every burst
       nose: new THREE.MeshStandardMaterial({
         color: palette.b, roughness: 0.28, metalness: 0.6, envMapIntensity: 0.9,
@@ -424,10 +844,56 @@ function paletteMats(palette) {
   }
   return m;
 }
+
+// Wrapper cache, bounded: 9 types x 12 palettes could otherwise pin ~100
+// 512x1024 canvases in VRAM over a long night. Entries carry a refcount
+// (_buildMesh acquires, removeItem releases); past the cap, the oldest
+// unreferenced wrapper is disposed and will simply regenerate if that
+// combination ever comes off the press again.
+const LABEL_CACHE = new Map();
+const LABEL_CACHE_MAX = 36;
+function labelMat(typeName, palette) {
+  const key = `${typeName}|${palette.name}`;
+  let m = LABEL_CACHE.get(key);
+  if (!m) {
+    if (LABEL_CACHE.size >= LABEL_CACHE_MAX) {
+      for (const [k, old] of LABEL_CACHE) {
+        if ((old.userData.refs ?? 0) <= 0) {
+          old.map?.dispose(); // per-entry canvas; paper grain maps are shared
+          old.dispose();
+          LABEL_CACHE.delete(k);
+          break;
+        }
+      }
+    }
+    const paper = paperMaps();
+    // lacquered printed wrapper — sheen + fiber grain is what reads
+    // "store-bought firework" instead of "painted cylinder"
+    m = new THREE.MeshStandardMaterial({
+      map: labelTexture(typeName, palette),
+      normalMap: paper.normal,
+      normalScale: new THREE.Vector2(0.4, 0.4),
+      roughnessMap: paper.rough,
+      roughness: 1.0, // the map carries the actual value
+      metalness: 0, envMapIntensity: 0.75,
+      emissive: new THREE.Color(palette.a).multiplyScalar(0.14),
+    });
+    m.userData.refs = 0;
+    LABEL_CACHE.set(key, m);
+  }
+  return m;
+}
 const WOOD_ITEM_MAT = new THREE.MeshStandardMaterial({ color: 0x9c8a6a, roughness: 0.8 });
 const TUBE_MAT = new THREE.MeshStandardMaterial({ color: 0x443830, roughness: 0.85 });
 const CHAR_MAT = new THREE.MeshStandardMaterial({ color: 0x2c241c, roughness: 0.98 });
-const FUSE_MAT = new THREE.LineBasicMaterial({ color: 0x304028 });
+// physical odds and ends every stand-bought piece carries
+const CLAY_MAT = new THREE.MeshStandardMaterial({ color: 0xa06a48, roughness: 0.92 });
+const TAPE_MAT = new THREE.MeshStandardMaterial({ color: 0xc9b98e, roughness: 0.55, envMapIntensity: 0.6 });
+// visco fuse: green-braided cord, and the charred remnant behind the front.
+// The tip carries a faint pale emissive so an unlit fuse is findable by
+// moonlight (the glow sprite on top does the burning).
+const FUSE_MAT = new THREE.MeshStandardMaterial({ color: 0x46523a, roughness: 0.9 });
+const FUSE_CHAR_MAT = new THREE.MeshStandardMaterial({ color: 0x16120e, roughness: 1.0 });
 // glossy red cracker paper (per-instance color carries the shade variation);
 // the emissive floor keeps the roll readable scarlet in moonlight instead of
 // collapsing to black-on-black like pure diffuse red would
@@ -466,11 +932,17 @@ export class FireworkItem {
     const t = this.type;
     const root = this.root;
     const woodMat = WOOD_ITEM_MAT;
-    const labelMat = paletteMats(this.palette).label;
+    const wrapMat = labelMat(this.typeName, this.palette);
+    wrapMat.userData.refs = (wrapMat.userData.refs ?? 0) + 1;
+    this.wrapMat = wrapMat; // released in removeItem
+    // per-instance identity: spin the wrap seam so two same-palette pieces
+    // from the crate never present byte-identical faces (free — shared
+    // geometry + material, only the mesh's rotation differs)
+    const seamSpin = Math.random() * Math.PI * 2;
 
     if (t.kind === 'rocket') {
       const stick = new THREE.Mesh(
-        cachedGeo(`stick`, () => new THREE.CylinderGeometry(0.004, 0.004, 1, 5)),
+        cachedGeo(`stick`, () => new THREE.CylinderGeometry(0.004, 0.004, 1, 8)),
         woodMat,
       );
       stick.scale.y = t.stickLen;
@@ -478,20 +950,50 @@ export class FireworkItem {
       root.add(stick);
 
       const body = new THREE.Mesh(
-        cachedGeo('body', () => new THREE.CylinderGeometry(1, 1, 1, 10)),
-        labelMat,
+        cachedGeo('body', () => new THREE.CylinderGeometry(1, 1, 1, 16)),
+        wrapMat,
       );
       body.scale.set(t.bodyR, t.bodyLen, t.bodyR);
       body.position.y = t.stickLen - t.bodyLen / 2;
+      body.rotation.y = seamSpin;
       root.add(body);
 
       const nose = new THREE.Mesh(
-        cachedGeo('nose', () => new THREE.ConeGeometry(1, 1, 10)),
+        cachedGeo('nose', () => new THREE.ConeGeometry(1, 1, 16)),
         paletteMats(this.palette).nose,
       );
       nose.scale.set(t.bodyR, t.bodyR * 2.4, t.bodyR);
       nose.position.y = t.stickLen + t.bodyR * 1.2;
       root.add(nose);
+
+      // seam line where the nose cap presses over the wrap
+      const seam = new THREE.Mesh(
+        cachedGeo('noseseam', () => new THREE.CylinderGeometry(1.015, 1.015, 1, 16, 1, true)),
+        CHAR_MAT,
+      );
+      seam.scale.set(t.bodyR, 0.004, t.bodyR);
+      seam.position.y = t.stickLen - 0.003;
+      root.add(seam);
+
+      // clay nozzle ring at the motor base — the bit that actually throats
+      // the burn on a real black-powder motor
+      const nozzle = new THREE.Mesh(
+        cachedGeo('claynozzle', () => new THREE.CylinderGeometry(0.86, 1.0, 1, 16, 1, true)),
+        CLAY_MAT,
+      );
+      nozzle.scale.set(t.bodyR * 0.98, t.bodyR * 0.55, t.bodyR * 0.98);
+      nozzle.position.y = t.stickLen - t.bodyLen - t.bodyR * 0.1;
+      root.add(nozzle);
+
+      // two tape wraps binding the guide stick to the tube
+      const tapeGeo = cachedGeo('tape', () => new THREE.CylinderGeometry(1.03, 1.03, 1, 16, 1, true));
+      for (const f of [0.16, 0.78]) {
+        const tape = new THREE.Mesh(tapeGeo, TAPE_MAT);
+        tape.scale.set(t.bodyR, 0.008, t.bodyR);
+        tape.position.y = t.stickLen - t.bodyLen + t.bodyLen * f;
+        tape.rotation.y = seamSpin * 1.7;
+        root.add(tape);
+      }
 
       this.grabY = t.stickLen - t.bodyLen / 2; // hold at the body
       this.grabTop = t.stickLen + t.bodyR * 2.4; // grabbable anywhere on the stick
@@ -499,12 +1001,22 @@ export class FireworkItem {
       this.fuseTip = new THREE.Vector3(t.bodyR + 0.012, t.stickLen - t.bodyLen - 0.035, 0);
     } else if (t.kind === 'fountain') {
       const cone = new THREE.Mesh(
-        cachedGeo('fcone', () => new THREE.CylinderGeometry(0.35, 1, 1, 12)),
-        labelMat,
+        cachedGeo('fcone', () => new THREE.CylinderGeometry(0.35, 1, 1, 16)),
+        wrapMat,
       );
       cone.scale.set(t.baseR, t.height, t.baseR);
       cone.position.y = t.height / 2;
+      cone.rotation.y = seamSpin;
       root.add(cone);
+      this.coneMesh = cone; // burn-down shader hooks on while erupting
+      // wooden base plate so it sits on the sand like the store sold it
+      const plate = new THREE.Mesh(
+        cachedGeo('fplate', () => new THREE.CylinderGeometry(1, 1.06, 1, 16)),
+        woodMat,
+      );
+      plate.scale.set(t.baseR * 1.18, 0.012, t.baseR * 1.18);
+      plate.position.y = 0.006;
+      root.add(plate);
       this.grabY = t.height / 2;
       this.grabTop = t.height;
       this.fuseBase = new THREE.Vector3(0, t.height, 0);
@@ -514,7 +1026,7 @@ export class FireworkItem {
       // a wheel of rocket drivers nailed to a stake: the stake runs up local
       // +Y, the wheel hangs just in front of it and spins around local Z
       const stake = new THREE.Mesh(
-        cachedGeo('pwstake', () => new THREE.CylinderGeometry(0.008, 0.011, 1, 6)),
+        cachedGeo('pwstake', () => new THREE.CylinderGeometry(0.008, 0.011, 1, 8)),
         woodMat,
       );
       stake.scale.y = t.stickLen;
@@ -542,7 +1054,7 @@ export class FireworkItem {
 
       const rim = new THREE.Mesh(
         cachedGeo('pwrim', () => {
-          const g = new THREE.TorusGeometry(1, 0.055, 6, 22);
+          const g = new THREE.TorusGeometry(1, 0.055, 8, 28);
           g.rotateX(Math.PI / 2); // torus lies in X-Z so it spins around Y
           return g;
         }),
@@ -557,7 +1069,7 @@ export class FireworkItem {
       const driverGeo = cachedGeo('pwdriver', () => new THREE.CylinderGeometry(0.014, 0.014, 0.09, 8));
       for (let i = 0; i < t.drivers; i++) {
         const a = (i / t.drivers) * Math.PI * 2;
-        const driver = new THREE.Mesh(driverGeo, labelMat);
+        const driver = new THREE.Mesh(driverGeo, wrapMat);
         driver.position.set(Math.cos(a) * t.wheelR, 0, Math.sin(a) * t.wheelR);
         driver.rotation.order = 'YXZ';
         driver.rotation.y = -a;      // face the tube along the tangent
@@ -576,12 +1088,23 @@ export class FireworkItem {
       this.fuseTip = new THREE.Vector3(t.wheelR * 0.7 + 0.012, t.stickLen - t.wheelR * 0.7 - 0.045, 0.055);
     } else if (t.kind === 'candle') {
       const tube = new THREE.Mesh(
-        cachedGeo('ctube', () => new THREE.CylinderGeometry(1, 1, 1, 10)),
-        labelMat,
+        cachedGeo('ctube', () => new THREE.CylinderGeometry(1, 1, 1, 16)),
+        wrapMat,
       );
       tube.scale.set(t.bodyR, t.bodyLen, t.bodyR);
       tube.position.y = t.bodyLen / 2;
+      tube.rotation.y = seamSpin;
       root.add(tube);
+      // char band: a sleeve that creeps down the tube one shot at a time
+      // (scaled to zero until the first shot chars it)
+      const sleeve = new THREE.Mesh(
+        cachedGeo('charsleeve', () => new THREE.CylinderGeometry(1.025, 1.025, 1, 16, 1, true)),
+        CHAR_MAT,
+      );
+      sleeve.scale.set(t.bodyR, 0.0001, t.bodyR);
+      sleeve.position.y = t.bodyLen;
+      root.add(sleeve);
+      this.charSleeve = sleeve;
       this.grabY = t.bodyLen * 0.4;
       this.grabTop = t.bodyLen;
       this.fuseBase = new THREE.Vector3(0, t.bodyLen, 0);
@@ -639,6 +1162,18 @@ export class FireworkItem {
         cordGeo.dispose();
       };
 
+      // shipping band around the flat roll — rips away the moment the coil
+      // unfreezes (grabbed or lit), like the paper it is
+      const band = new THREE.Mesh(
+        cachedGeo('beltband', () => new THREE.CylinderGeometry(1, 1, 1, 16, 1, true)),
+        wrapMat,
+      );
+      band.scale.set(0.081, 0.034, 0.081);
+      band.position.y = 0.024;
+      band.rotation.y = seamSpin;
+      root.add(band);
+      this.beltBand = band;
+
       this.grabY = 0.02; // reach is per-rope-point — see grabDistance in input.js
       this.fuseBase = new THREE.Vector3();       // both repositioned every
       this.fuseTip = new THREE.Vector3(0, -0.045, 0); // frame to the strand's far end
@@ -646,18 +1181,22 @@ export class FireworkItem {
     } else if (t.kind === 'cake') {
       const box = new THREE.Mesh(
         cachedGeo('cakebox', () => new THREE.BoxGeometry(1, 1, 1)),
-        labelMat,
+        wrapMat,
       );
       box.scale.set(t.boxW, t.boxH, t.boxW);
       box.position.y = t.boxH / 2;
       root.add(box);
       const tubeGeo = cachedGeo('caketube', () => new THREE.CylinderGeometry(0.016, 0.016, 0.05, 8));
       const tubeMat = TUBE_MAT;
+      // keep the meshes indexed: _cakeShot fires from these REAL tubes in a
+      // scrambled-but-fixed order and chars each rim as it goes
+      this.cakeTubes = [];
       for (let ix = -1; ix <= 1; ix++) {
         for (let iz = -1; iz <= 1; iz++) {
           const tube = new THREE.Mesh(tubeGeo, tubeMat);
           tube.position.set(ix * 0.055, t.boxH + 0.02, iz * 0.055);
           root.add(tube);
+          this.cakeTubes.push(tube);
         }
       }
       this.grabY = t.boxH / 2;
@@ -667,18 +1206,89 @@ export class FireworkItem {
       this.nozzleY = t.boxH + 0.045;
     }
 
-    // items throw moon shadows like everything else on the sand
-    root.traverse((o) => { if (o.isMesh) o.castShadow = true; });
+    // items throw moon shadows like everything else on the sand — and catch
+    // each other's (a rocket shades the crate straw it leans on)
+    root.traverse((o) => {
+      if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; }
+    });
 
-    // the fuse cord
-    const fuseGeo = new THREE.BufferGeometry().setFromPoints([this.fuseBase, this.fuseTip]);
-    this.fuseLine = new THREE.Line(fuseGeo, FUSE_MAT);
-    root.add(this.fuseLine);
+    // the fuse cord: a real braided tube (1-px lines vanish at fuse-lighting
+    // distance, which is exactly where you stare at it). Two pieces sharing
+    // cached unit geometry: live cord base->burn front, charred remnant
+    // burn front->tip. Both are restretched every frame by _updateFuse.
+    this.fuseLive = new THREE.Mesh(
+      cachedGeo('fusetube', () => new THREE.TubeGeometry(
+        new THREE.CatmullRomCurve3([
+          new THREE.Vector3(0, 0, 0), new THREE.Vector3(0.004, 0.33, 0.002),
+          new THREE.Vector3(0.005, 0.66, -0.002), new THREE.Vector3(0, 1, 0),
+        ]), 7, 0.0016, 6, false)),
+      FUSE_MAT,
+    );
+    this.fuseChar = new THREE.Mesh(
+      cachedGeo('fusechartube', () => new THREE.TubeGeometry(
+        new THREE.CatmullRomCurve3([
+          new THREE.Vector3(0, 0, 0), new THREE.Vector3(0.006, 0.4, 0.003),
+          new THREE.Vector3(0.002, 0.75, -0.004), new THREE.Vector3(-0.004, 1, 0),
+        ]), 7, 0.001, 6, false)),
+      FUSE_CHAR_MAT,
+    );
+    this.fuseLive.castShadow = false;
+    this.fuseChar.castShadow = false;
+    root.add(this.fuseLive, this.fuseChar);
 
     // where fuse sparks live (moves toward fuseBase as it burns)
     this.fuseAnchor = new THREE.Object3D();
     this.fuseAnchor.position.copy(this.fuseTip);
     root.add(this.fuseAnchor);
+
+    // the tip bead: pale so an unlit fuse is findable by moonlight, blooming
+    // hot while burning, and warming under a hovering torch flame (fuseGlow)
+    this.fuseTipSprite = new THREE.Sprite(new THREE.SpriteMaterial({
+      map: fuseTipTexture(), transparent: true, opacity: 0.14, depthWrite: false,
+      blending: THREE.AdditiveBlending, color: 0xd8d2b8, fog: false,
+    }));
+    this.fuseTipSprite.scale.setScalar(0.014);
+    this.fuseAnchor.add(this.fuseTipSprite);
+    this._updateFuse();
+  }
+
+  // One fuse segment: stretch `mesh` from `from` to `to` along its local +Y.
+  _fuseSeg(mesh, from, to, hidden) {
+    _fv1.subVectors(to, from);
+    const len = _fv1.length();
+    if (len < 0.004 || hidden) { mesh.visible = false; return; }
+    mesh.visible = true;
+    mesh.position.copy(from);
+    mesh.quaternion.setFromUnitVectors(UP, _fv1.multiplyScalar(1 / len));
+    mesh.scale.y = len;
+  }
+
+  // Stretch the live/char fuse tubes between base, burn front and tip, and
+  // run the tip bead's glow state. Pure local-space math, no allocations.
+  _updateFuse() {
+    const anchor = this.fuseAnchor.position;
+    const hidden = !!this.beltPts && (this.state === 'active' || this.state === 'spent');
+    this._fuseSeg(this.fuseLive, this.fuseBase, anchor, hidden);
+    this._fuseSeg(this.fuseChar, anchor, this.fuseTip, hidden);
+    const tip = this.fuseTipSprite;
+    if (hidden) { tip.visible = false; return; }
+    tip.visible = true;
+    const glow = clamp(this.fuseGlow ?? 0, 0, 1);
+    if (this.fuseRemaining > 0) {
+      // burning: hot orange bead, sputter-flickering
+      tip.material.color.setHex(0xffb050);
+      tip.material.opacity = 0.75 + Math.random() * 0.25;
+      tip.scale.setScalar(0.022 + Math.random() * 0.012);
+    } else if (glow > 0.01) {
+      // torch hovering: the 'almost lit' warm-up must be visible
+      tip.material.color.setHex(0xffc878);
+      tip.material.opacity = 0.14 + glow * 0.7;
+      tip.scale.setScalar(0.014 + glow * 0.012);
+    } else {
+      tip.material.color.setHex(0xd8d2b8);
+      tip.material.opacity = 0.14;
+      tip.scale.setScalar(0.014);
+    }
   }
 
   fuseWorldPos(out = new THREE.Vector3()) {
@@ -818,11 +1428,8 @@ export class FireworkItem {
     this.root.worldToLocal(_bp);
     this.fuseTip.copy(_bp);
     if (!this.isLit) this.fuseAnchor.position.copy(this.fuseTip);
-    const fp = this.fuseLine.geometry.attributes.position;
-    fp.setXYZ(0, this.fuseBase.x, this.fuseBase.y, this.fuseBase.z);
-    fp.setXYZ(1, this.fuseAnchor.position.x, this.fuseAnchor.position.y, this.fuseAnchor.position.z);
-    fp.needsUpdate = true;
-    this.fuseLine.visible = this.state !== 'active' && this.state !== 'spent';
+    // the shipping band exists only while the roll is still a roll
+    if (this.beltBand) this.beltBand.visible = this.beltFrozen;
 
     // stamp the crackers along the strand, herringbone-braided in pairs
     const mesh = this.crackerMesh;
@@ -874,6 +1481,8 @@ export class FireworkItem {
     this.sounds.fuse = sys.audio.play('fuse', this.fuseWorldPos(_v1), {
       gain: 0.8, loop: true, refDistance: 0.6, send: 0.1, hrtf: true,
     });
+    // a burning fuse really lights the tube and the hand around it
+    sys.fuseLights?.acquire(this);
     return true;
   }
 
@@ -901,39 +1510,185 @@ export class FireworkItem {
       this.fuseRemaining -= dt;
       const n = clamp(this.fuseRemaining / this.type.fuseTime, 0, 1);
       this.fuseAnchor.position.lerpVectors(this.fuseBase, this.fuseTip, n);
-      // shorten the fuse cord as it burns toward the body
-      const fp = this.fuseLine.geometry.attributes.position;
-      fp.setXYZ(1, this.fuseAnchor.position.x, this.fuseAnchor.position.y, this.fuseAnchor.position.z);
-      fp.needsUpdate = true;
-      // sputtering sparks
+      // sputtering sparks off the burn front
       const p = this.fuseWorldPos(_v1);
-      sys.spawnFuseSparks(p, time, dt);
+      sys.spawnFuseSparks(this, p, time, dt);
       this.sounds.fuse?.setPosition(p);
       if (this.fuseRemaining <= 0) {
         this.sounds.fuse?.stop();
         delete this.sounds.fuse;
         sys.activate(this);
       }
+    } else if ((this.fuseGlow ?? 0) > 0.01 && this.state !== 'active' && this.state !== 'spent') {
+      // torch hovering at the tip: a couple of anticipation sparks before it
+      // actually catches — the 'almost lit' state must be visible
+      sys.spawnFuseGlowSparks(this, this.fuseWorldPos(_v1), time, dt, this.fuseGlow);
+    }
+    // fuseGlow is fed by the torch hand each frame; fade it ourselves so a
+    // withdrawn torch doesn't leave a tip warmed forever
+    if (this.fuseGlow) this.fuseGlow = Math.max(0, this.fuseGlow - dt * 4);
+    this._updateFuse();
+
+    // stale throw state can't survive a plant or a re-grab: the integrator
+    // only ever owns an item that is actually loose in the air
+    if (this.vel && (this.holder || this.state === 'planted' || this.state === 'idle' || this.state === 'held')) {
+      this.vel = null;
+      this.angVel = null;
+      this._bounced = this._grounded = false;
+      this._settle = null;
     }
 
-    // free fall when dropped (belts drape themselves — the rope owns motion)
-    if (!this.beltPts
-      && (this.state === 'lying' || this.state === 'active' || this.state === 'spent') && this.fallVel !== 0) {
-      this.fallVel = Math.max(this.fallVel - 9.81 * dt, -12);
-      this.root.position.y += this.fallVel * dt;
-      const ground = sys.groundHeight(this.root.position.x, this.root.position.z);
-      if (this.root.position.y <= ground + 0.02) {
-        this.root.position.y = ground + 0.02;
-        this.fallVel = 0;
-        if (this.state === 'lying') {
-          // unlit items topple flat; active ones stay as they landed
-          this.root.quaternion.setFromAxisAngle(
-            _v2.set(Math.random() - 0.5, 0, Math.random() - 0.5).normalize(),
-            Math.PI / 2 * 0.96,
-          );
+    // thrown/dropped flight (belts drape themselves — the rope owns motion):
+    // full 3D tumble when the release handed over a velocity (input sets
+    // item.vel/item.angVel — see the hand-off contract); the legacy straight
+    // drop when it didn't
+    if (!this.beltPts && !this.holder
+      && (this.state === 'lying' || this.state === 'active' || this.state === 'spent')) {
+      if (this.vel) {
+        this._integrateFlight(dt, time);
+      } else if (this.fallVel !== 0) {
+        this.fallVel = Math.max(this.fallVel - 9.81 * dt, -12);
+        this.root.position.y += this.fallVel * dt;
+        const ground = sys.groundHeight(this.root.position.x, this.root.position.z);
+        if (this.root.position.y <= ground + 0.02) {
+          this.root.position.y = ground + 0.02;
+          this.fallVel = 0;
+          if (this.state === 'lying') {
+            // unlit items topple flat; active ones stay as they landed
+            this.root.quaternion.setFromAxisAngle(
+              _v2.set(Math.random() - 0.5, 0, Math.random() - 0.5).normalize(),
+              Math.PI / 2 * 0.96,
+            );
+          }
+          sys.audio.play('thud', this.root.position, { gain: 0.7, refDistance: 1.5 });
         }
-        sys.audio.play('thud', this.root.position, { gain: 0.7, refDistance: 1.5 });
       }
+    }
+  }
+
+  /**
+   * Thrown-item flight: ballistic + light quadratic drag + tumble, one soft
+   * bounce off the sand with tangential friction, then an eased settle to a
+   * natural rest pose grown out of the impact orientation. A lit item burns
+   * straight through all of it — its emitters read the root every frame, so
+   * a thrown erupting fountain sprays all along its arc (and keeps spraying
+   * however it lands; hard landings never extinguish anything).
+   */
+  _integrateFlight(dt, time) {
+    const sys = this.system;
+    const v = this.vel;
+
+    if (this._settle) {
+      // easing to rest from the impact orientation
+      const s = this._settle;
+      s.t += dt;
+      const k = Math.min(1, dt * 7);
+      this.root.quaternion.slerp(s.q, k);
+      const gy = sys.groundHeight(this.root.position.x, this.root.position.z) + 0.02;
+      this.root.position.y += (gy - this.root.position.y) * Math.min(1, dt * 9);
+      if (s.t > 0.55) {
+        this.root.quaternion.copy(s.q);
+        this.root.position.y = gy;
+        this.vel = null;
+        this.angVel = null;
+        this._settle = null;
+        this._bounced = this._grounded = false;
+        this.fallVel = 0;
+      }
+      return;
+    }
+
+    // air phase
+    v.y -= 9.81 * dt;
+    const sp = v.length();
+    v.multiplyScalar(1 / (1 + ITEM_DRAG_K * sp * dt));
+    this.root.position.addScaledVector(v, dt);
+    if (this.angVel) {
+      const w = this.angVel.length();
+      if (w > 1e-4) {
+        _fq.setFromAxisAngle(_fv1.copy(this.angVel).multiplyScalar(1 / w), w * dt);
+        this.root.quaternion.premultiply(_fq);
+        this.angVel.multiplyScalar(Math.max(0, 1 - 0.55 * dt)); // spin bleeds off in air
+      }
+    }
+
+    // ground contact: test the item's axis ends (base sits at the root, the
+    // far end grabTop up the local axis) so a tumbling tube touches down on
+    // whichever end actually arrives first
+    const base = this.root.position;
+    this.axis(_fv2);
+    _fv3.copy(base).addScaledVector(_fv2, this.grabTop ?? 0.1);
+    const penBase = sys.groundHeight(base.x, base.z) + 0.015 - base.y;
+    const penTip = sys.groundHeight(_fv3.x, _fv3.z) + 0.015 - _fv3.y;
+    const pen = Math.max(penBase, penTip);
+    if (pen > 0) {
+      base.y += pen;
+      const n = sys._groundNormal(base.x, base.z, _fv2);
+      const vn = v.dot(n);
+      const impact = -vn;
+      if (vn < 0) {
+        if (!this._bounced && impact > 1.4) {
+          // the one bounce: soft restitution, most of the slide ground away
+          this._bounced = true;
+          v.addScaledVector(n, -(1 + ITEM_RESTITUTION) * vn);
+          const kn = v.dot(n);
+          _fv3.copy(n).multiplyScalar(kn);
+          v.sub(_fv3).multiplyScalar(ITEM_FRICTION).add(_fv3);
+          // skid torque: the hit converts travel into tumble
+          if (!this.angVel) this.angVel = new THREE.Vector3();
+          _fv1.crossVectors(n, v);
+          if (_fv1.lengthSq() > 1e-4) {
+            this.angVel.addScaledVector(_fv1.normalize(), Math.min(6, impact * 0.8));
+          }
+        } else {
+          // down for good: grind out whatever motion is left
+          v.addScaledVector(n, -vn);
+          v.multiplyScalar(Math.max(0, 1 - 7 * dt));
+          this.angVel?.multiplyScalar(Math.max(0, 1 - 7 * dt));
+          this._grounded = true;
+        }
+        // landing thud weighted by how hard it came in
+        if (impact > 0.9 && time - (this._thudT ?? -9) > 0.22) {
+          this._thudT = time;
+          sys.audio.play('thud', base, {
+            gain: clamp(0.25 + impact * 0.11, 0.3, 1.1),
+            refDistance: 1.5, rate: randRange(0.92, 1.12),
+          });
+          if (impact > 3.2) {
+            sys._groundSplash(base, _c1.set(0xc9a06a), Math.min(1.1, impact / 9));
+          }
+        }
+      }
+    }
+
+    // slow and grounded: pick the rest pose and ease into it
+    if (this._grounded && v.lengthSq() < 0.09
+      && (!this.angVel || this.angVel.lengthSq() < 0.5)) {
+      if (this.state === 'active') {
+        // an erupting piece stays exactly as it landed — a fountain on its
+        // side hosing sparks across the sand is the whole reward
+        this.vel = null;
+        this.angVel = null;
+        this._bounced = this._grounded = false;
+        this.fallVel = 0;
+        return;
+      }
+      const axis = this.axis(_fv1);
+      const kind = this.type.kind;
+      _fq.copy(this.root.quaternion);
+      if ((kind === 'fountain' || kind === 'cake') && axis.y > 0.75) {
+        // flat-bottomed piece that came down near-upright: rock upright
+        _fv2.copy(axis);
+        _fq.setFromUnitVectors(_fv2, UP).multiply(this.root.quaternion);
+      } else {
+        // everything else keels over along whichever way it was already
+        // leaning (or sliding), and lies there
+        _fv2.set(axis.x, 0, axis.z);
+        if (_fv2.lengthSq() < 0.003) _fv2.set(v.x, 0, v.z);
+        if (_fv2.lengthSq() < 0.003) _fv2.set(Math.random() - 0.5, 0, Math.random() - 0.5);
+        _fq.setFromUnitVectors(UP, _fv2.normalize());
+      }
+      this._settle = { q: _fq.clone(), t: 0 };
     }
   }
 }
@@ -950,11 +1705,18 @@ export class FireworksSystem {
     this.rockets = [];   // in-flight
     this.emitters = [];  // fountains / candles / cakes running
     this.events = [];    // {time, fn}
+    this.debris = [];    // tumbling charred sticks etc. (capped, FIFO)
     this.time = 0;
-    this.flashes = new FlashPool(scene, 4);
-    this.flashSprites = new FlashSprites(scene, 4);
+    // shell flashes get depth (8 lights / 10 sprites, weakest-evicted);
+    // muzzle-class pops (lifts, candle/cake shots, belt crackers) live in
+    // their own tiny pool so they can never evict a grand shell's afterglow
+    this.flashes = new FlashPool(scene, 8);
+    this.utilFlashes = new FlashPool(scene, 2);
+    this.flashSprites = new FlashSprites(scene, 10, pool.atlas);
+    this.fuseLights = new FuseLightPool(scene, 4);
     this.onBoom = null; // hook for haptics: (pos, size) => {}
-    this._fuseSparkAcc = 0;
+    this._riserT = -9;    // throttle: risers thin out during walls
+    this._padShots = 0;   // every ~4th ground launch feeds the pad haze
 
     // aggregate "the sky just lit up" signal — world.js feeds this into the
     // hemisphere light so a burst overhead washes the whole basin, not just
@@ -991,6 +1753,60 @@ export class FireworksSystem {
       scene.add(l);
       this.emitterLights.push({ light: l, owner: null });
     }
+
+    // spent-belt confetti: torn red paper scraps left on the sand. One
+    // shared instanced mesh for the whole desert, 64 scraps FIFO — old ones
+    // quietly vanish under new belts, nothing ever allocates mid-session.
+    {
+      const c = document.createElement('canvas');
+      c.width = c.height = 32;
+      const g = c.getContext('2d');
+      g.clearRect(0, 0, 32, 32);
+      g.fillStyle = '#b42222';
+      g.beginPath(); // a ragged little polygon of cracker paper
+      g.moveTo(6, 2); g.lineTo(26, 5); g.lineTo(30, 18); g.lineTo(22, 29);
+      g.lineTo(8, 27); g.lineTo(2, 14);
+      g.closePath(); g.fill();
+      g.fillStyle = '#7c1010';
+      g.fillRect(6, 12, 20, 3);
+      const tex = new THREE.CanvasTexture(c);
+      tex.colorSpace = THREE.SRGBColorSpace;
+      const mesh = new THREE.InstancedMesh(
+        new THREE.PlaneGeometry(0.028, 0.02),
+        new THREE.MeshStandardMaterial({
+          map: tex, alphaTest: 0.5, side: THREE.DoubleSide,
+          roughness: 0.8, emissive: 0x30060a,
+        }),
+        64,
+      );
+      _bm.makeScale(0, 0, 0);
+      for (let i = 0; i < 64; i++) {
+        mesh.setMatrixAt(i, _bm);
+        _c1.setHSL(0.995 + Math.random() * 0.015, 0.85, 0.4 + Math.random() * 0.2);
+        mesh.setColorAt(i, _c1);
+      }
+      mesh.frustumCulled = false;
+      mesh.castShadow = false;
+      mesh.receiveShadow = true;
+      scene.add(mesh);
+      this.scrapMesh = mesh;
+      this._scrapCursor = 0;
+    }
+  }
+
+  // Lay one paper scrap flat on the sand (spent-belt litter).
+  _dropScrap(x, z) {
+    const mesh = this.scrapMesh;
+    const i = this._scrapCursor;
+    this._scrapCursor = (this._scrapCursor + 1) % 64;
+    const y = this.groundHeight(x, z) + 0.006;
+    this._groundNormal(x, z, _bn);
+    _bq.setFromUnitVectors(_bt.set(0, 0, 1), _bn); // plane faces up the slope normal
+    _fq.setFromAxisAngle(_bn, Math.random() * Math.PI * 2);
+    _bq.premultiply(_fq);
+    _bm.compose(_bp.set(x, y, z), _bq, _bs.setScalar(randRange(0.8, 1.4)));
+    mesh.setMatrixAt(i, _bm);
+    mesh.instanceMatrix.needsUpdate = true;
   }
 
   _acquireEmitterLight(owner) {
@@ -1015,7 +1831,9 @@ export class FireworksSystem {
 
   removeItem(item) {
     item.extinguishSounds();
-    item.fuseLine?.geometry.dispose(); // per-item buffer, unlike the cached meshes
+    this.fuseLights.release(item);
+    item.fuseTipSprite?.material.dispose(); // per-item (opacity varies); texture is shared
+    if (item.wrapMat) item.wrapMat.userData.refs = Math.max(0, (item.wrapMat.userData.refs ?? 1) - 1);
     item.dispose?.();
     // never leave a hand pointing at a despawned item — that hand could
     // otherwise never grab again
@@ -1045,6 +1863,8 @@ export class FireworksSystem {
   // ---- ignition outcomes ----
 
   activate(item) {
+    // fuse burned down: the tube owns the light now
+    this.fuseLights.release(item);
     const kind = item.type.kind;
     if (kind === 'rocket') this._launchRocket(item);
     else if (kind === 'fountain') this._startFountain(item);
@@ -1111,12 +1931,13 @@ export class FireworksSystem {
         time, randRange(0.2, 0.5),
         randRange(0.012, 0.022), 0.8, 2.2, 0);
     });
-    // gunpowder smoke builds along the belt as it rips
+    // gunpowder smoke builds along the belt as it rips, rolling downwind
     if (item.beltConsumed % 3 === 0) {
+      const wdx = WIND.x * 0.45, wdz = WIND.z * 0.45;
       pool.spawn(2, (i) => {
         pool.set(i,
           px, py + 0.04, pz,
-          randRange(-0.3, 0.3), randRange(0.25, 0.6), randRange(-0.3, 0.3),
+          randRange(-0.3, 0.3) + wdx, randRange(0.25, 0.6), randRange(-0.3, 0.3) + wdz,
           0.42, 0.42, 0.46,
           time, randRange(2.2, 4.4),
           randRange(0.28, 0.5), -0.02, 1.6, -1);
@@ -1127,24 +1948,39 @@ export class FireworksSystem {
     kick.pp.x -= randRange(-1.7, 1.7) * 0.016;
     kick.pp.y -= randRange(0.9, 2.8) * 0.016;
     kick.pp.z -= randRange(-1.7, 1.7) * 0.016;
-    // occasional visible flash on the surroundings
-    if (Math.random() < 0.12) this.flashes.flash(pos, 0xffd9a8, 5 + Math.random() * 7, 0.05);
+    // occasional visible flash on the surroundings (muzzle-class — the
+    // utility pool, so a ripping belt can't strip a shell's afterglow)
+    if (Math.random() < 0.12) this.utilFlashes.flash(pos, 0xffd9a8, 5 + Math.random() * 7, 0.05);
   }
 
   _spendBelt(item) {
     if (!this.items.has(item)) return;
     item.state = 'spent';
     item.extinguishSounds();
-    // nothing left but the charred braid cord on the sand
+    // nothing left but the charred braid cord on the sand...
     item.cordLine.material = BELT_CORD_CHAR_MAT;
-    // give the rope a moment to settle, then stop simulating it entirely
+    // ...plus torn paper and a scorch trail where the rip ran the cord
+    const scraps = 3 + ((Math.random() * 3) | 0);
+    for (let s = 0; s < scraps; s++) {
+      const p = item.beltPointAt(Math.random(), _v1);
+      this._dropScrap(p.x + randRange(-0.06, 0.06), p.z + randRange(-0.06, 0.06));
+    }
+    for (let s = 0; s < 4; s++) {
+      const p = item.beltPointAt((s + 0.5) / 4, _v1);
+      this.groundMark?.(p.x, p.z, randRange(0.08, 0.14), 0.35);
+    }
+    this.audio.play('rustle', item.beltPointAt(0.5, _v1), { gain: 0.5, refDistance: 1.2 });
+    // give the rope a moment to settle, then stop simulating it entirely;
+    // the charred cord stays as evidence for a good while
     this.schedule(3, () => { item.beltStatic = true; });
-    this.schedule(18, () => this.removeItem(item));
+    this.schedule(45, () => this.removeItem(item));
   }
 
   _launchRocket(item) {
     item.state = 'active';
-    item.fallVel = 0; // flight integrator owns the motion now
+    item.fallVel = 0;   // flight integrator owns the motion now
+    item.vel = null;    // ...including over any throw the hand handed off
+    item.angVel = null;
     // gripped like a real bottle rocket: your hand pins it down, so the
     // motor burns (and the timer runs) right where you hold it — the update
     // loop hands it over to free flight the moment you let go
@@ -1206,29 +2042,104 @@ export class FireworksSystem {
     r.flare = null;
   }
 
-  // The blast of grit and the rolling dust cloud a motor kicks off the pad.
+  // A charred guide stick tumbling out of a big rocket's break. Debris is
+  // capped FIFO — a long finale can't accumulate scene nodes — and every
+  // stick shares the cached geometry + CHAR_MAT (nothing to dispose).
+  _dropStick(pos, vel, stickLen) {
+    if (this.debris.length >= 8) {
+      const old = this.debris.shift();
+      old.mesh.removeFromParent();
+    }
+    const mesh = new THREE.Mesh(
+      cachedGeo('stick', () => new THREE.CylinderGeometry(0.004, 0.004, 1, 8)),
+      CHAR_MAT,
+    );
+    mesh.scale.y = stickLen;
+    mesh.position.copy(pos);
+    this.debris.push({
+      mesh,
+      vel: new THREE.Vector3(vel.x * 0.3 + randRange(-2, 2), randRange(-1, 1), vel.z * 0.3 + randRange(-2, 2)),
+      angVel: new THREE.Vector3(randRange(-9, 9), randRange(-3, 3), randRange(-9, 9)),
+      rest: false, t: 0,
+    });
+    this.scene.add(mesh);
+  }
+
+  _updateDebris(dt) {
+    for (let i = this.debris.length - 1; i >= 0; i--) {
+      const d = this.debris[i];
+      d.t += dt;
+      if (d.t > 60) { // long enough that the sand remembers the show
+        d.mesh.removeFromParent();
+        this.debris.splice(i, 1);
+        continue;
+      }
+      if (d.rest) continue;
+      d.vel.y -= 9.81 * dt;
+      d.vel.multiplyScalar(1 / (1 + 0.10 * d.vel.length() * dt)); // sticks flutter
+      d.mesh.position.addScaledVector(d.vel, dt);
+      const w = d.angVel.length();
+      if (w > 1e-4) {
+        _fq.setFromAxisAngle(_fv1.copy(d.angVel).multiplyScalar(1 / w), w * dt);
+        d.mesh.quaternion.premultiply(_fq);
+      }
+      const p = d.mesh.position;
+      const gy = this.groundHeight(p.x, p.z);
+      if (p.y <= gy + 0.015) {
+        p.y = gy + 0.015;
+        // one dead-stick thud, then lie flat along the current heading
+        this.audio.play('thud', p, { gain: 0.35, refDistance: 2, rate: randRange(1.2, 1.5) });
+        _fv2.set(0, 1, 0).applyQuaternion(d.mesh.quaternion);
+        _fv1.set(_fv2.x, 0, _fv2.z);
+        if (_fv1.lengthSq() < 0.01) _fv1.set(Math.random() - 0.5, 0, Math.random() - 0.5);
+        d.mesh.quaternion.setFromUnitVectors(UP, _fv1.normalize());
+        d.rest = true;
+      }
+    }
+  }
+
+  // The blast of grit and the rolling dust cloud a motor kicks off the pad —
+  // the sheet hugs the local dune face (ground normal), not world-XZ, so a
+  // launch off a slope blows its dust down the slope. Scorches the sand.
   _padDust(pos, size) {
     const pool = this.pool;
     const time = this.time;
     pos.y = this.groundHeight(pos.x, pos.z);
-    // sharp radial sand kick
+    this.groundMark?.(pos.x, pos.z, 0.28 + 0.3 * size, 0.45);
+    // slope basis: u/w span the ground plane, n lifts off it
+    const n = this._groundNormal(pos.x, pos.z, _fv1);
+    const u = _fv2.crossVectors(n, Math.abs(n.x) < 0.9 ? X_AXIS : UP).normalize();
+    const w = _fv3.crossVectors(n, u).normalize();
+    const nx = n.x, ny = n.y, nz = n.z;
+    const ux2 = u.x, uy2 = u.y, uz2 = u.z;
+    const wx2 = w.x, wy2 = w.y, wz2 = w.z;
+    // sharp radial sand kick, sprayed in the ground plane
     pool.spawn(24 + Math.round(20 * size), (i) => {
       const a = Math.random() * Math.PI * 2;
+      const ca = Math.cos(a), sa = Math.sin(a);
       const sp = randRange(1.5, 4.2) * (0.6 + size);
+      const lift = randRange(0.4, 1.6);
       pool.set(i,
-        pos.x + Math.cos(a) * 0.05, pos.y + 0.04, pos.z + Math.sin(a) * 0.05,
-        Math.cos(a) * sp, randRange(0.4, 1.6), Math.sin(a) * sp,
+        pos.x + (ux2 * ca + wx2 * sa) * 0.05, pos.y + 0.04, pos.z + (uz2 * ca + wz2 * sa) * 0.05,
+        (ux2 * ca + wx2 * sa) * sp + nx * lift,
+        (uy2 * ca + wy2 * sa) * sp + ny * lift,
+        (uz2 * ca + wz2 * sa) * sp + nz * lift,
         0.85, 0.62, 0.34,
         time, randRange(0.4, 0.9),
         randRange(0.02, 0.05), 1.3, 2.6, 0);
     });
-    // billowing dust that hangs around the pad after the rocket is gone
+    // billowing dust that hangs around the pad and rides the night's wind
+    const wdx = WIND.x * 0.6, wdz = WIND.z * 0.6;
     pool.spawn(9 + Math.round(8 * size), (i) => {
       const a = Math.random() * Math.PI * 2;
+      const ca = Math.cos(a), sa = Math.sin(a);
       const sp = randRange(0.5, 1.5) * (0.6 + size);
+      const lift = randRange(0.25, 0.8);
       pool.set(i,
         pos.x, pos.y + 0.15, pos.z,
-        Math.cos(a) * sp, randRange(0.25, 0.8), Math.sin(a) * sp,
+        (ux2 * ca + wx2 * sa) * sp + nx * lift + wdx,
+        (uy2 * ca + wy2 * sa) * sp + ny * lift,
+        (uz2 * ca + wz2 * sa) * sp + nz * lift + wdz,
         0.46, 0.36, 0.24,
         time, randRange(1.8, 3.2),
         randRange(0.45, 0.85) * (0.6 + size), -0.02, 1.8, -1);
@@ -1243,9 +2154,38 @@ export class FireworksSystem {
     const sound = this.audio.play('fountain', nozzle, {
       gain: 1.0, loop: true, refDistance: 2.5, send: 0.3, hrtf: true,
     });
+    // burn-down: the cone chars from the nozzle toward the base over the
+    // run. The shared wrapper material is cloned ONLY while erupting (and
+    // disposed at the end); the constant program cache key means every
+    // burning fountain ever shares one compiled shader variant.
+    let uBurn = null, burnMat = null;
+    if (item.coneMesh) {
+      uBurn = { value: 0 };
+      burnMat = item.coneMesh.material.clone();
+      burnMat.onBeforeCompile = (sh) => {
+        sh.uniforms.uBurn = uBurn;
+        sh.vertexShader = 'varying float vBurnY;\n' + sh.vertexShader.replace(
+          '#include <begin_vertex>',
+          '#include <begin_vertex>\n\tvBurnY = position.y;',
+        );
+        sh.fragmentShader = 'varying float vBurnY;\nuniform float uBurn;\nfloat burnK;\n'
+          + sh.fragmentShader
+            .replace('#include <color_fragment>',
+              '#include <color_fragment>\n'
+              + '\t// char front sweeps from the nozzle (local y +0.5) down the cone\n'
+              + '\tfloat burnEdge = 0.5 - uBurn * 1.12;\n'
+              + '\tburnK = smoothstep(burnEdge - 0.1, burnEdge + 0.04, vBurnY);\n'
+              + '\tdiffuseColor.rgb *= mix(1.0, 0.1, burnK);')
+            .replace('#include <emissivemap_fragment>',
+              '#include <emissivemap_fragment>\n'
+              + '\ttotalEmissiveRadiance *= mix(1.0, 0.04, burnK);');
+      };
+      burnMat.customProgramCacheKey = () => 'fountain-burn';
+      item.coneMesh.material = burnMat;
+    }
     this.emitters.push({
       kind: 'fountain', item, age: 0, duration: t.duration, sound,
-      phase: Math.random() * 7,
+      phase: Math.random() * 7, uBurn, burnMat,
     });
   }
 
@@ -1299,7 +2239,14 @@ export class FireworksSystem {
     item.root.localToWorld(muzzle);
     const dir = item.axis(new THREE.Vector3());
     this.audio.play('shot', muzzle, { gain: 1.0, refDistance: 3, send: 0.3, rate: randRange(0.9, 1.15) });
-    this.flashes.flash(muzzle, item.palette.a, 35, 0.14);
+    this.utilFlashes.flash(muzzle, item.palette.a, 35, 0.14);
+    // each shot chars the tube a little further down from the mouth
+    if (item.charSleeve) {
+      const frac = (index + 1) / item.type.shots;
+      const len = item.type.bodyLen * frac * 0.92;
+      item.charSleeve.scale.y = Math.max(0.002, len);
+      item.charSleeve.position.y = item.type.bodyLen - len / 2;
+    }
 
     // comet star — bounces off the sand if the candle is aimed at the ground
     const col = new THREE.Color(index % 2 ? item.palette.a : item.palette.b);
@@ -1330,8 +2277,14 @@ export class FireworksSystem {
 
   _cakeShot(item, index, isFinale) {
     if (!this.items.has(item)) return;
-    const muzzle = new THREE.Vector3(randRange(-0.05, 0.05), item.nozzleY, randRange(-0.05, 0.05));
+    // fire from the REAL tubes, dancing around the 3x3 grid in a fixed
+    // scramble so successive shots come from different corners of the box
+    const tube = item.cakeTubes?.[CAKE_FIRE_ORDER[index % 9]];
+    const muzzle = tube
+      ? new THREE.Vector3(tube.position.x, item.nozzleY, tube.position.z)
+      : new THREE.Vector3(randRange(-0.05, 0.05), item.nozzleY, randRange(-0.05, 0.05));
     item.root.localToWorld(muzzle);
+    if (tube) tube.material = CHAR_MAT; // the rim blackens the moment it fires
     const dir = item.axis(new THREE.Vector3());
     // slight per-shot spread
     dir.x += randRange(-0.09, 0.09);
@@ -1339,7 +2292,22 @@ export class FireworksSystem {
     dir.normalize();
 
     this.audio.play('lift', muzzle, { gain: 1.2, refDistance: 4, send: 0.4, rate: randRange(0.9, 1.1) });
-    this.flashes.flash(muzzle, 0xffc890, 55, 0.16);
+    this.utilFlashes.flash(muzzle, 0xffc890, 55, 0.16);
+    // muzzle smoke curling off the fired tube
+    {
+      const pool = this.pool;
+      const time = this.time;
+      const mx = muzzle.x, my = muzzle.y, mz = muzzle.z;
+      const wdx = WIND.x * 0.5, wdz = WIND.z * 0.5;
+      pool.spawn(2, (i) => {
+        pool.set(i,
+          mx, my + 0.02, mz,
+          randRange(-0.15, 0.15) + wdx, randRange(0.3, 0.7), randRange(-0.15, 0.15) + wdz,
+          0.4, 0.4, 0.44,
+          time, randRange(1.6, 3.0),
+          randRange(0.14, 0.24), -0.02, 1.6, -1);
+      });
+    }
 
     // real mortar pacing: the star streaks upward for a couple of seconds,
     // goes quiet near apex, THEN breaks — bursts land 50-70 m up
@@ -1351,7 +2319,7 @@ export class FireworksSystem {
       ? randPick(['multibreak', 'palm', 'dahlia', 'chrys', 'brocade', 'serpents', 'kamuro', 'timerain', 'saturn', 'thousandbloom', 'strobewillow', 'farfalle'])
       : randPick(['peony', 'dahlia', 'ring', 'crackle', 'strobe', 'willow', 'serpents', 'ghost', 'saturn', 'leaves', 'spider', 'dragoneggs', 'bees', 'tourbillon']);
     this._fireShot(muzzle, vel, col, 1.35, {
-      gravity: 0.9, drag: 0.35, flightT,
+      gravity: 0.9, drag: 0.35, flightT, pattern,
       onBurst: (p, v) => this.burst(p, {
         pattern,
         size: isFinale ? 1.25 : 0.6,
@@ -1381,13 +2349,13 @@ export class FireworksSystem {
     this.audio.play('lift', pos, {
       gain: 1.25, refDistance: 4, send: 0.45, rate: randRange(0.88, 1.08), delayBySound: true,
     });
-    this.flashes.flash(_v2.copy(pos).setY(pos.y + 0.4), 0xffc890, 60, 0.18);
+    this.utilFlashes.flash(_v2.copy(pos).setY(pos.y + 0.4), 0xffc890, 60, 0.18);
     const palette = opts.palette ?? randPick(PALETTES);
     const size = opts.size ?? 1;
     const vel = dir.clone().multiplyScalar(opts.speed ?? 52);
     this._fireShot(pos.clone(), vel, new THREE.Color(palette.a), 1.5, {
       gravity: 0.9, drag: 0.35, flightT: opts.flightT ?? 2.8,
-      tail: opts.tail,
+      tail: opts.tail, pattern: opts.pattern,
       onBurst: (p, v) => {
         if (opts.burst === false) this._fizzle(p, palette);
         else {
@@ -1431,7 +2399,7 @@ export class FireworksSystem {
     pool.spawn(3, (i) => {
       pool.set(i,
         pos.x, pos.y, pos.z,
-        randRange(-0.3, 0.3), randRange(0.2, 0.6), randRange(-0.3, 0.3),
+        randRange(-0.3, 0.3) + WIND.x * 0.4, randRange(0.2, 0.6), randRange(-0.3, 0.3) + WIND.z * 0.4,
         0.38, 0.38, 0.42,
         time, randRange(1.8, 3.2),
         randRange(0.3, 0.55), -0.015, 1.4, -1);
@@ -1471,8 +2439,9 @@ export class FireworksSystem {
         gain: 1.15, refDistance: 4, send: 0.4, rate: randRange(1.0, 1.18), delayBySound: true,
       });
     }
-    this.flashes.flash(_v4.copy(pos).setY(pos.y + 0.6), palette.a, 38 + 46 * size, 0.3);
+    this.utilFlashes.flash(_v4.copy(pos).setY(pos.y + 0.6), palette.a, 38 + 46 * size, 0.3);
     this._padDust(pos.clone(), size);
+    this.groundMark?.(pos.x, pos.z, 0.5 + 0.4 * size, 0.6); // mines burn their pit black
 
     const spMul = 0.7 + size * 0.5;
     const grav = 1.0, drg = 0.55;
@@ -1578,12 +2547,17 @@ export class FireworksSystem {
     if (!this.items.has(item)) return;
     item.state = 'spent';
     item.extinguishSounds();
-    // char the item (shared material — item visuals are palette-cached),
-    // fade it away a bit later
+    // char the item (shared material — item visuals are palette-cached);
+    // the husk stands as evidence for a good while before fading away
     item.root.traverse((o) => {
       if (o.isMesh) o.material = CHAR_MAT;
     });
-    this.schedule(25, () => this.removeItem(item));
+    // scorch the sand under a piece that burned out on (or near) it
+    const p = item.root.getWorldPosition(_v1);
+    if (p.y - this.groundHeight(p.x, p.z) < 0.5) {
+      this.groundMark?.(p.x, p.z, 0.16 + item.type.size * 0.14, 0.5);
+    }
+    this.schedule(90, () => this.removeItem(item));
   }
 
   // ---- ground contact ----
@@ -1620,6 +2594,74 @@ export class FireworksSystem {
    */
   _fireShot(pos, vel, color, sizeMul, opts, bounceNum = 0) {
     const { gravity, drag, flightT } = opts;
+
+    if (bounceNum === 0) {
+      // riser voices: whistling inserts (serpents, tourbillons, fish)
+      // announce themselves on the way up; big display comets get a quiet
+      // secondary whoosh with the receding pitch ramp the rockets use.
+      // Throttled — a finale wall stays a wall of reports, not thirty
+      // overlapping whooshes.
+      const whistler = opts.pattern === 'serpents' || opts.pattern === 'tourbillon'
+        || opts.pattern === 'fish';
+      if ((whistler || sizeMul >= 1.2) && this.time - this._riserT > 0.28) {
+        this._riserT = this.time;
+        if (whistler) {
+          const h = this.audio.play('whistle', pos, {
+            gain: 0.55, refDistance: 5, send: 0.35, rate: randRange(0.92, 1.12), delayBySound: true,
+          });
+          if (h) { // pyro whistles sweep upward as the insert climbs
+            const pr = h.source.playbackRate;
+            pr.setTargetAtTime(pr.value * 1.18, this.audio.ctx.currentTime, flightT * 0.45);
+          }
+        } else {
+          const h = this.audio.play('whoosh', pos, {
+            gain: 0.3, refDistance: 4, send: 0.3, rate: randRange(0.95, 1.1), delayBySound: true,
+          });
+          if (h) this._recedeWhoosh(h);
+        }
+      }
+      // ground-launch theater: a mortar or cake tube coughs grit and muzzle
+      // smoke; every ~4th launch also feeds a long-hanging haze puff, so a
+      // battery that has been firing for a minute stands in its own shroud
+      // (lit from inside by later breaks — that's the payoff)
+      const gy = this.groundHeight(pos.x, pos.z);
+      if (sizeMul >= 1.2 && pos.y - gy < 0.6) {
+        const pool = this.pool;
+        const time = this.time;
+        const px = pos.x, py = pos.y, pz = pos.z;
+        const wdx = WIND.x, wdz = WIND.z;
+        pool.spawn(8, (i) => {
+          const a = Math.random() * Math.PI * 2;
+          const sp = randRange(0.8, 2.4);
+          pool.set(i,
+            px, py + 0.05, pz,
+            Math.cos(a) * sp, randRange(0.3, 1.2), Math.sin(a) * sp,
+            0.8, 0.6, 0.34,
+            time, randRange(0.35, 0.7),
+            randRange(0.02, 0.04), 1.2, 2.6, 0);
+        });
+        pool.spawn(3, (i) => {
+          pool.set(i,
+            px, py + 0.2, pz,
+            randRange(-0.2, 0.2) + wdx * 0.5, randRange(0.4, 0.9), randRange(-0.2, 0.2) + wdz * 0.5,
+            0.42, 0.42, 0.46,
+            time, randRange(2.0, 3.5),
+            randRange(0.3, 0.55), -0.02, 1.6, -1);
+        });
+        this.groundMark?.(px, pz, 0.35, 0.3);
+        this._padShots++;
+        if (this._padShots % 4 === 0) {
+          pool.spawn(2, (i) => {
+            pool.set(i,
+              px + randRange(-0.6, 0.6), py + randRange(0.8, 1.8), pz + randRange(-0.6, 0.6),
+              wdx * 0.45 + randRange(-0.1, 0.1), randRange(0.1, 0.3), wdz * 0.45 + randRange(-0.1, 0.1),
+              0.30, 0.30, 0.33, // low albedo: the shroud reads by depth, not density
+              time, randRange(12, 20),
+              randRange(1.6, 2.6), -0.006, 1.1, -1);
+          });
+        }
+      }
+    }
 
     // march the arc looking for a ground strike
     let tHit = -1;
@@ -1677,19 +2719,76 @@ export class FireworksSystem {
 
   // ---- particles ----
 
-  spawnFuseSparks(pos, time, dt) {
-    this._fuseSparkAcc += dt * 90;
-    const n = Math.floor(this._fuseSparkAcc);
-    this._fuseSparkAcc -= n;
+  /**
+   * Per-item fuse fire: a steady fizz plus Poisson gouts — irregular spitting
+   * bursts of 6-10 stretched sparks with the odd grey wisp, each fuse on its
+   * own clock (two burning fuses must sputter independently, so the old
+   * shared accumulator is gone).
+   */
+  spawnFuseSparks(item, pos, time, dt) {
+    const pool = this.pool;
+    const px = pos.x, py = pos.y, pz = pos.z;
+    // baseline fizz
+    item._fuseAcc = (item._fuseAcc ?? Math.random()) + dt * 34;
+    const n = Math.floor(item._fuseAcc);
+    item._fuseAcc -= n;
+    if (n > 0) {
+      pool.spawn(n, (i) => {
+        pool.set(i,
+          px + randRange(-0.008, 0.008), py + randRange(-0.008, 0.008), pz + randRange(-0.008, 0.008),
+          randRange(-0.5, 0.5), randRange(0.1, 0.9), randRange(-0.5, 0.5),
+          1.0, 0.75, 0.3,
+          time, randRange(0.15, 0.45),
+          randRange(0.008, 0.02), 0.35, 2.5, 0);
+      });
+    }
+    // the gouts: the fuse finds a pocket of powder and SPITS
+    item._fuseGout = (item._fuseGout ?? randRange(0.1, 0.4)) - dt;
+    if (item._fuseGout <= 0) {
+      item._fuseGout = randRange(0.14, 0.55);
+      const burst = 6 + ((Math.random() * 5) | 0);
+      pool.spawn(burst, (i) => {
+        const sp = randRange(0.7, 2.1);
+        const a = Math.random() * Math.PI * 2;
+        const u = randRange(-0.3, 1);
+        const rr = Math.sqrt(1 - u * u);
+        pool.set(i,
+          px, py, pz,
+          rr * Math.cos(a) * sp, u * sp + 0.4, rr * Math.sin(a) * sp,
+          Math.random() < 0.3 ? 3.4 : 1.3, Math.random() < 0.5 ? 1.0 : 0.7, 0.3,
+          time, randRange(0.2, 0.55),
+          randRange(0.01, 0.022), 0.5, 1.9, 0,
+          Math.random() < 0.3 ? CELL.STAR6 : CELL.GLOW, 0.05);
+      });
+      if (Math.random() < 0.35) { // a wisp of grey off the burn front
+        pool.spawn(1, (i) => {
+          pool.set(i,
+            px, py + 0.01, pz,
+            WIND.x * 0.3 + randRange(-0.06, 0.06), randRange(0.12, 0.3), WIND.z * 0.3 + randRange(-0.06, 0.06),
+            0.42, 0.42, 0.45,
+            time, randRange(1.2, 2.4),
+            randRange(0.05, 0.1), -0.02, 1.5, -1);
+        });
+      }
+    }
+  }
+
+  // The torch is CLOSE: the tip cooks and throws a couple of anticipation
+  // sparks before it actually catches (driven by item.fuseGlow, 0..1).
+  spawnFuseGlowSparks(item, pos, time, dt, glow) {
+    item._fuseAcc = (item._fuseAcc ?? Math.random()) + dt * 14 * glow;
+    const n = Math.floor(item._fuseAcc);
+    item._fuseAcc -= n;
     if (n <= 0) return;
     const pool = this.pool;
+    const px = pos.x, py = pos.y, pz = pos.z;
     pool.spawn(n, (i) => {
       pool.set(i,
-        pos.x + randRange(-0.008, 0.008), pos.y + randRange(-0.008, 0.008), pos.z + randRange(-0.008, 0.008),
-        randRange(-0.5, 0.5), randRange(0.1, 0.9), randRange(-0.5, 0.5),
-        1.0, 0.75, 0.3,
-        time, randRange(0.15, 0.45),
-        randRange(0.008, 0.02), 0.35, 2.5, 0);
+        px + randRange(-0.006, 0.006), py + randRange(-0.006, 0.006), pz + randRange(-0.006, 0.006),
+        randRange(-0.25, 0.25), randRange(0.1, 0.5), randRange(-0.25, 0.25),
+        1.1, 0.7, 0.25,
+        time, randRange(0.12, 0.3),
+        randRange(0.006, 0.014), 0.3, 2.4, 0);
     });
   }
 
@@ -1780,20 +2879,58 @@ export class FireworksSystem {
     });
   }
 
-  spawnTrail(pos, vel, dt, time, size) {
+  /**
+   * Motor exhaust in three passes: white-hot grit right off the nozzle,
+   * flame tinted by the shell's own colors blended toward white-hot, and a
+   * long-life grey smoke column that keeps hanging (and drifting downwind)
+   * after the rocket is gone — every rise leaves a trace in the air.
+   */
+  spawnTrail(pos, vel, dt, time, size, palette) {
     const pool = this.pool;
-    const count = Math.max(1, Math.round(dt * 220 * (0.5 + size)));
-    pool.spawn(count, (i) => {
+    const px = pos.x, py = pos.y, pz = pos.z;
+    const vx = vel.x, vy = vel.y, vz = vel.z;
+    // flame tone: the palette's star color pushed most of the way to furnace
+    const c = _c1.set(palette?.a ?? 0xffab42);
+    const fr = c.r + (1 - c.r) * 0.62, fg = c.g + (1 - c.g) * 0.5, fb = c.b + (1 - c.b) * 0.3;
+    const grit = Math.max(1, Math.round(dt * 130 * (0.5 + size)));
+    pool.spawn(grit, (i) => {
       const back = Math.random() * dt;
       pool.set(i,
-        pos.x - vel.x * back + randRange(-0.015, 0.015),
-        pos.y - vel.y * back + randRange(-0.015, 0.015),
-        pos.z - vel.z * back + randRange(-0.015, 0.015),
+        px - vx * back + randRange(-0.012, 0.012),
+        py - vy * back + randRange(-0.012, 0.012),
+        pz - vz * back + randRange(-0.012, 0.012),
+        randRange(-1.6, 1.6), randRange(-1.8, 0.4), randRange(-1.6, 1.6),
+        2.4, 2.0, 1.4,
+        time - back, randRange(0.1, 0.3),
+        randRange(0.012, 0.028) * (0.6 + size), 0.5, 2.2, 0,
+        CELL.GLOW, 0.05);
+    });
+    const flame = Math.max(1, Math.round(dt * 110 * (0.5 + size)));
+    pool.spawn(flame, (i) => {
+      const back = Math.random() * dt;
+      pool.set(i,
+        px - vx * back + randRange(-0.015, 0.015),
+        py - vy * back + randRange(-0.015, 0.015),
+        pz - vz * back + randRange(-0.015, 0.015),
         randRange(-1.2, 1.2), randRange(-1.5, 0.4), randRange(-1.2, 1.2),
-        1.0, 0.62, 0.22,
+        fr * 1.6, fg * 1.3, fb * 0.9,
         time - back, randRange(0.3, 0.8),
         randRange(0.02, 0.045) * (0.6 + size), 0.4, 2.2, 0);
     });
+    // the hanging column (cheap: a few long-lived puffs per second of burn)
+    const smoke = Math.floor(dt * 26 * (0.5 + size) + Math.random());
+    if (smoke > 0) {
+      const wdx = WIND.x * 0.55, wdz = WIND.z * 0.55;
+      pool.spawn(smoke, (i) => {
+        const back = Math.random() * dt;
+        pool.set(i,
+          px - vx * back, py - vy * back, pz - vz * back,
+          wdx + randRange(-0.2, 0.2), randRange(0.05, 0.35), wdz + randRange(-0.2, 0.2),
+          0.38, 0.38, 0.42,
+          time - back, randRange(2.5, 4.0),
+          randRange(0.22, 0.42) * (0.6 + size), -0.012, 1.4, -1);
+      });
+    }
   }
 
   /**
@@ -1856,20 +2993,54 @@ export class FireworksSystem {
 
       // lingering smoke haze: a real occluding cloud (albedo, lit by the
       // moon and by later bursts — see the particle shader) that swells and
-      // drifts downwind after the stars die. What keeps a big shell from
-      // just vanishing into clean air, and what the next shell lights up.
+      // drifts on the shared desert WIND after the stars die. What keeps a
+      // big shell from vanishing into clean air, and what the next shell
+      // lights up. Big shells hang more of it, for longer.
+      const bigShell = size > 0.9;
       if (size > 0.3) {
-        pool.spawn(10 + Math.round(12 * size), (i) => {
+        const wdx = WIND.x * 0.55, wdz = WIND.z * 0.55;
+        pool.spawn(bigShell ? Math.round(18 + 22 * size) : 10 + Math.round(12 * size), (i) => {
           const u = Math.random() * 2 - 1;
           const a = Math.random() * Math.PI * 2;
           const rr = Math.sqrt(1 - u * u);
           const sp = randRange(1.2, 3.2) * (0.5 + size);
           pool.set(i,
             pos.x, pos.y, pos.z,
-            rr * Math.cos(a) * sp + dvx * 0.4 + 0.5, u * sp * 0.6 + dvy * 0.3 + 0.25, rr * Math.sin(a) * sp + dvz * 0.4,
+            rr * Math.cos(a) * sp + dvx * 0.4 + wdx, u * sp * 0.6 + dvy * 0.3 + 0.25, rr * Math.sin(a) * sp + dvz * 0.4 + wdz,
             0.34 + colA.r * 0.10, 0.34 + colA.g * 0.10, 0.37 + colA.b * 0.10,
-            time, randRange(3.5, 6.5) * (0.7 + size * 0.5),
+            time, bigShell ? randRange(6, 11) : randRange(3.5, 6.5) * (0.7 + size * 0.5),
             randRange(0.9, 1.6) * (0.5 + size), -0.012, 1.2, -1);
+        });
+      }
+      if (bigShell) {
+        // the smoke ring: a real shell leaves a slowly widening torus on
+        // its burst plane, hanging long after the color is gone
+        const wdx = WIND.x * 0.5, wdz = WIND.z * 0.5;
+        const ringN = 15 + Math.round(6 * size);
+        pool.spawn(ringN, (i) => {
+          const a = (i / ringN) * Math.PI * 2 + Math.random() * 0.25;
+          const sp = randRange(2.4, 3.4) * (0.6 + size * 0.4);
+          pool.set(i,
+            pos.x + Math.cos(a) * 0.6, pos.y + randRange(-0.3, 0.3), pos.z + Math.sin(a) * 0.6,
+            Math.cos(a) * sp + dvx * 0.3 + wdx, randRange(-0.1, 0.35), Math.sin(a) * sp + dvz * 0.3 + wdz,
+            0.32, 0.32, 0.35,
+            time + randRange(0.1, 0.5), randRange(7, 11),
+            randRange(1.0, 1.7) * (0.5 + size * 0.5), -0.008, 0.75, -1);
+        });
+        // heavy fallout: slow embers that actually REACH the sand and die
+        // there as coals (the pool's aGroundY settling holds them on the
+        // dunes) — after a grand shell the ground below glitters and cools
+        pool.spawn(18 + Math.round(12 * Math.min(size, 1.6)), (i) => {
+          const u = Math.random() * 2 - 1;
+          const a = Math.random() * Math.PI * 2;
+          const rr = Math.sqrt(1 - u * u);
+          const sp = randRange(3, 8);
+          pool.set(i,
+            pos.x, pos.y, pos.z,
+            rr * Math.cos(a) * sp + dvx * 0.5, u * sp * 0.6 - 1 + dvy * 0.4, rr * Math.sin(a) * sp + dvz * 0.5,
+            2.3, 1.15, 0.35,
+            time, randRange(6, 9),
+            randRange(0.05, 0.09), 0.55, 0.35, 7);
         });
       }
     }
@@ -3002,15 +4173,18 @@ export class FireworksSystem {
         const nx2 = n.x, ny2 = n.y, nz2 = n.z;
         const sp = 13 + 8 * size; // ~1 s expansion to a 25-30 m figure
         const nPts = pts.length / 3;
+        // ±6% of the expansion speed in depth (a real former isn't flat) and
+        // a dim second copy of the outline shifted off the plane: edge-on
+        // the figure reads as a soft double stroke, never a 1-px line
         let gj = -1, gvx, gvy, gvz, gcr, gcg, gcb, gLife, gLag;
-        pool.spawn(nPts * 3, (i) => {
+        pool.spawn(nPts * 4, (i) => {
           gj++;
-          const seg = gj % 3;
+          const seg = gj % 4;
           if (seg === 0) {
-            const o = ((gj / 3) | 0) * 3;
+            const o = ((gj / 4) | 0) * 3;
             const px2 = pts[o], py2 = pts[o + 1];
             const c = pts[o + 2] ? colB : colA;
-            const jn = randRange(-0.35, 0.35); // whisker of depth
+            const jn = sp * randRange(-0.06, 0.06); // whisker of depth
             gvx = (ux * px2 + wx * py2) * sp + nx2 * jn + dvx + randRange(-0.15, 0.15);
             gvy = (uy * px2 + wy * py2) * sp + ny2 * jn + dvy + randRange(-0.15, 0.15);
             gvz = (uz * px2 + wz * py2) * sp + nz2 * jn + dvz + randRange(-0.15, 0.15);
@@ -3020,12 +4194,21 @@ export class FireworksSystem {
             pool.set(i, pos.x, pos.y, pos.z, gvx, gvy, gvz, gcr, gcg, gcb,
               time, gLife, 0.13 * (0.7 + size * 0.5), 0.22, 0.8, 0,
               CELL.GLOW, 0.035);
-          } else {
+          } else if (seg < 3) {
             const fade = (1 - seg / 3) * 0.55;
             pool.set(i, pos.x, pos.y, pos.z, gvx, gvy, gvz,
               gcr * fade, gcg * fade, gcb * fade,
               time + seg * gLag, gLife * 0.95,
               0.13 * (0.7 + size * 0.5) * 0.7, 0.22, 0.8, 0,
+              CELL.GLOW, 0.035);
+          } else {
+            // the offset plane: same outline point pushed ~0.8 m/s along the
+            // normal, at a third of the light
+            pool.set(i, pos.x, pos.y, pos.z,
+              gvx + nx2 * 0.8, gvy + ny2 * 0.8, gvz + nz2 * 0.8,
+              gcr * 0.33, gcg * 0.33, gcb * 0.33,
+              time + gLag, gLife * 0.9,
+              0.13 * (0.7 + size * 0.5) * 0.8, 0.22, 0.8, 0,
               CELL.GLOW, 0.035);
           }
         });
@@ -3116,7 +4299,7 @@ export class FireworksSystem {
                 leg.x + leg.vx * k + randRange(-0.2, 0.2),
                 leg.y + leg.vy * k - gA * (ts - k) / dF,
                 leg.z + leg.vz * k + randRange(-0.2, 0.2),
-                randRange(-0.25, 0.25), randRange(0.1, 0.45), randRange(-0.25, 0.25),
+                randRange(-0.25, 0.25) + WIND.x * 0.35, randRange(0.1, 0.45), randRange(-0.25, 0.25) + WIND.z * 0.35,
                 0.42, 0.42, 0.45,
                 time + leg.t0 + ts, randRange(2.5, 5),
                 randRange(0.35, 0.65), -0.01, 1.3, -1);
@@ -3133,16 +4316,20 @@ export class FireworksSystem {
                 randRange(0.04, 0.06), 0.55, 0.9, 26);
             }
           });
-          // one pooled light follows the LEAD flare only — flares come in
-          // threes, fountain slots come in twos, and one moving key light
-          // already sells the whole cluster
-          if (f === 0) {
-            this.emitters.push({
-              kind: 'flare', age: 0, duration: L, path, g: gF, d: dF,
-              color: new THREE.Color(col[0], col[1], col[2]), lightSlot: null,
-              intensity: 260 + 240 * Math.min(size, 1.6),
-            });
-          }
+          // every flare tows a little canopy prop down its sway path (the
+          // 15 s dune-lighting descent has to read at close range too), but
+          // only the LEAD flare gets a pooled light — flares come in threes,
+          // fountain slots come in twos, and one moving key light already
+          // sells the whole cluster
+          const canopy = makeFlareCanopy(col);
+          canopy.visible = false; // placed on the first update tick
+          this.scene.add(canopy);
+          this.emitters.push({
+            kind: 'flare', age: 0, duration: L, path, g: gF, d: dF,
+            color: new THREE.Color(col[0], col[1], col[2]), lightSlot: null,
+            intensity: 260 + 240 * Math.min(size, 1.6),
+            lit: f === 0, canopy,
+          });
         }
         break;
       }
@@ -3242,7 +4429,7 @@ export class FireworksSystem {
           const rr = randRange(2.5, 4) * scale2;
           pool.set(i,
             pos.x + Math.cos(a) * rr, pos.y + randRange(0.5, 1.5), pos.z + Math.sin(a) * rr,
-            Math.cos(a) * 0.7, randRange(1.0, 1.8), Math.sin(a) * 0.7,
+            Math.cos(a) * 0.7 + WIND.x * 0.4, randRange(1.0, 1.8), Math.sin(a) * 0.7 + WIND.z * 0.4,
             0.16, 0.15, 0.15,
             time + randRange(0.5, 0.9), randRange(4.5, 7.5),
             randRange(1.2, 2.2) * scale2, -0.02, 1.3, -1);
@@ -3349,7 +4536,7 @@ export class FireworksSystem {
 
         // exhaust
         if (burning) {
-          this.spawnTrail(r.pos, r.vel, dt, time, r.item.type.size);
+          this.spawnTrail(r.pos, r.vel, dt, time, r.item.type.size, r.item.palette);
           if (r.flare) {
             // ride the nozzle, flickering like real motor exhaust
             r.flare.position.copy(r.pos).addScaledVector(_v1, r.flareOffset);
@@ -3402,6 +4589,11 @@ export class FireworksSystem {
           sound: t.size > 0.75 ? 'big' : t.size > 0.45 ? 'med' : 'small',
           drift: r.vel.clone().multiplyScalar(0.55),
         });
+        // the big rockets leave a body: a charred guide stick tumbles out
+        // of the break, thuds into the dunes and lies there
+        if (item.typeName === 'rocketLarge' || item.typeName === 'rocketGrand') {
+          this._dropStick(r.pos, r.vel, t.stickLen);
+        }
       }
     }
 
@@ -3429,10 +4621,12 @@ export class FireworksSystem {
           e.sound?.stop(0.6);
           this._releaseEmitterLight(e.lightSlot);
           e.lightSlot = null;
+          e.burnMat?.dispose(); // _spend swaps the husk to CHAR_MAT anyway
           this.emitters.splice(i, 1);
           if (this.items.has(item)) this._spend(item);
           continue;
         }
+        if (e.uBurn) e.uBurn.value = n; // the char front tracks the burn
         // ramp up, sustain, sputter out
         const power = n < 0.1 ? n / 0.1 : n > 0.85 ? Math.max(0.15, 1 - (n - 0.85) / 0.15) : 1;
         const nozzle = _v3.set(0, item.nozzleY, 0);
@@ -3557,13 +4751,14 @@ export class FireworksSystem {
           this.schedule(randRange(0.75, 1.05), () => this.audio.play('cracker', fp, {
             gain: 1.25, refDistance: 2.4, send: 0.45, rate: 0.72,
           }));
-          // and the pall of smoke the whole belt earned
+          // and the pall of smoke the whole belt earned, drifting downwind
           const pool = this.pool;
+          const wdx = WIND.x * 0.5, wdz = WIND.z * 0.5;
           pool.spawn(10, (idx) => {
             const a = item.beltPointAt(Math.random(), _v4);
             pool.set(idx,
               a.x + randRange(-0.1, 0.1), a.y + 0.08, a.z + randRange(-0.1, 0.1),
-              randRange(-0.3, 0.3), randRange(0.3, 0.7), randRange(-0.3, 0.3),
+              randRange(-0.3, 0.3) + wdx, randRange(0.3, 0.7), randRange(-0.3, 0.3) + wdz,
               0.40, 0.40, 0.44,
               time, randRange(4, 8),
               randRange(0.4, 0.8), -0.015, 1.4, -1);
@@ -3668,6 +4863,11 @@ export class FireworksSystem {
         if (e.age >= e.duration) {
           this._releaseEmitterLight(e.lightSlot);
           e.lightSlot = null;
+          if (e.canopy) {
+            e.canopy.removeFromParent();
+            e.canopy.userData.mat?.dispose(); // per-flare tint; geo/tex shared
+            e.canopy = null;
+          }
           this.emitters.splice(i, 1);
           continue;
         }
@@ -3675,8 +4875,18 @@ export class FireworksSystem {
         for (let k = 1; k < e.path.length && e.path[k].t0 <= e.age; k++) seg = e.path[k];
         _v3.set(seg.x, seg.y, seg.z);
         _v4.set(seg.vx, seg.vy, seg.vz);
-        ballistic(_v3, _v4, e.age - seg.t0, e.g, e.d, _v3);
-        if (!e.lightSlot) e.lightSlot = this._acquireEmitterLight(e);
+        const legT = e.age - seg.t0;
+        ballistic(_v3, _v4, legT, e.g, e.d, _v3);
+        if (e.canopy) {
+          // the chute rides above the candle and heels away from the swing,
+          // like any pendulum bob's suspension
+          e.canopy.visible = true;
+          e.canopy.position.copy(_v3);
+          ballisticVel(_v4, legT, e.g, e.d, _v4);
+          _v4.y = 6; // mostly-up suspension direction, leaned by the sway
+          e.canopy.quaternion.setFromUnitVectors(UP, _v4.normalize());
+        }
+        if (e.lit !== false && !e.lightSlot) e.lightSlot = this._acquireEmitterLight(e);
         if (e.lightSlot) {
           const L = e.lightSlot.light;
           L.position.copy(_v3);
@@ -3687,18 +4897,25 @@ export class FireworksSystem {
         }
       }
     }
+    this._updateDebris(dt);
     this.flashes.update(dt);
+    this.utilFlashes.update(dt);
     this.flashSprites.update(dt);
+    this.fuseLights.update(time);
     // basin wash from recent bursts dies off quickly (half-life ~150ms)
     this.ambientPulse.energy *= Math.exp(-4.6 * dt);
 
     // feed the particle shader's smoke lighting: the strongest live flash
-    // plus the basin-wide burst wash — this is what makes every shell light
-    // its own smoke from inside, and old smoke bloom when a new one breaks
+    // (either pool — a candle muzzle lights nearby haze too) plus the
+    // basin-wide burst wash — this is what makes every shell light its own
+    // smoke from inside, and old smoke bloom when a new one breaks
     const u = this.pool.uniforms;
     if (u?.uFlashPos) {
       let best = null;
       for (const s of this.flashes.lights) {
+        if (s.peak > 0 && (!best || s.light.intensity > best.light.intensity)) best = s;
+      }
+      for (const s of this.utilFlashes.lights) {
         if (s.peak > 0 && (!best || s.light.intensity > best.light.intensity)) best = s;
       }
       if (best) {

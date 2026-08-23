@@ -5,10 +5,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
   <title>Desert Fireworks VR</title>
   <meta name="description" content="A WebXR fireworks sandbox for Meta Quest: a desert at night, an endless crate of fireworks, and very big booms.">
+  <meta name="theme-color" content="#05060f">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎆</text></svg>">
   <!-- bump ?v= together on each release: index.html then atomically pulls
        matching assets instead of mixing fresh HTML with stale cached CSS/JS -->
-  <link rel="stylesheet" href="style.css?v=14">
+  <link rel="stylesheet" href="style.css?v=15">
   <script type="importmap">
     {
       "imports": {
@@ -28,14 +29,19 @@
       <div class="buttons-secondary">
         <button id="btn-desktop">explore on desktop instead</button>
       </div>
-      <div class="help">
+      <p id="vr-note" class="vr-note" hidden>No headset here — on a Meta Quest, open this page in the headset browser for the real thing.</p>
+      <details id="help-details">
+        <summary>How to play</summary>
+        <div class="help">
         <div class="help-col">
           <h2>In VR (Quest)</h2>
           <ul>
-            <li><b>Grip</b> — grab a firework or the torch</li>
-            <li><b>Push the stick into the sand</b> and let go to plant it — any angle you like</li>
+            <li><b>Grip or trigger</b> — grab a firework or the torch; grab with the other hand to pass</li>
+            <li><b>Push the stick into the sand</b> and let go to plant it — any angle you like. Or just <b>throw it</b></li>
             <li><b>Touch the torch flame to a fuse</b> to light it… then step back</li>
             <li><b>Left stick</b> — walk &nbsp;·&nbsp; <b>Right stick</b> — snap turn</li>
+            <li><b>The plunger box</b> fires the big show &nbsp;·&nbsp; <b>brass pull-rings</b> teleport you out to the Colossus and home</li>
+            <li>Comfort vignette is on by default — add <b>?comfort=0</b> to the URL to switch it off</li>
           </ul>
         </div>
         <div class="help-col">
@@ -47,12 +53,13 @@
             <li><b>F</b> — quick-launch a random rocket (lazy mode)</li>
           </ul>
         </div>
-      </div>
+        </div>
+      </details>
       <p class="foot">Sound on. Everything you hear is synthesized live — turn it up for the bass.</p>
     </div>
   </div>
   <div id="reticle"></div>
   <div id="hud"></div>
-  <script type="module" src="src/main.js?v=14"></script>
+  <script type="module" src="src/main.js?v=15"></script>
 </body>
 </html>
