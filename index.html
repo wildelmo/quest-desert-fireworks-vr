@@ -8,7 +8,7 @@
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎆</text></svg>">
   <!-- bump ?v= together on each release: index.html then atomically pulls
        matching assets instead of mixing fresh HTML with stale cached CSS/JS -->
-  <link rel="stylesheet" href="style.css?v=14">
+  <link rel="stylesheet" href="style.css?v=15">
   <script type="importmap">
     {
       "imports": {
@@ -28,7 +28,10 @@
       <div class="buttons-secondary">
         <button id="btn-desktop">explore on desktop instead</button>
       </div>
-      <div class="help">
+      <p id="vr-note" class="vr-note" hidden>No headset here — on a Meta Quest, open this page in the headset browser for the real thing.</p>
+      <details id="help-details">
+        <summary>How to play</summary>
+        <div class="help">
         <div class="help-col">
           <h2>In VR (Quest)</h2>
           <ul>
@@ -47,12 +50,13 @@
             <li><b>F</b> — quick-launch a random rocket (lazy mode)</li>
           </ul>
         </div>
-      </div>
+        </div>
+      </details>
       <p class="foot">Sound on. Everything you hear is synthesized live — turn it up for the bass.</p>
     </div>
   </div>
   <div id="reticle"></div>
   <div id="hud"></div>
-  <script type="module" src="src/main.js?v=14"></script>
+  <script type="module" src="src/main.js?v=15"></script>
 </body>
 </html>

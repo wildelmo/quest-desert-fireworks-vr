@@ -192,6 +192,7 @@ export class AudioEngine {
 
   _buffer(name) {
     const arr = this.lib[name];
+    if (!arr || !arr.length) return null; // unknown sample: caller no-ops
     return arr[(Math.random() * arr.length) | 0];
   }
 
@@ -202,9 +203,11 @@ export class AudioEngine {
    */
   play(name, position, opts = {}) {
     if (!this.ready) return null;
+    const buf = this._buffer(name);
+    if (!buf) return null;
     const ctx = this.ctx;
     const src = ctx.createBufferSource();
-    src.buffer = this._buffer(name);
+    src.buffer = buf;
     src.loop = !!opts.loop;
     src.playbackRate.value = opts.rate ?? 1;
 
@@ -287,9 +290,11 @@ export class AudioEngine {
   // Non-positional (ambience / UI)
   playFlat(name, opts = {}) {
     if (!this.ready) return null;
+    const buf = this._buffer(name);
+    if (!buf) return null;
     const ctx = this.ctx;
     const src = ctx.createBufferSource();
-    src.buffer = this._buffer(name);
+    src.buffer = buf;
     src.loop = !!opts.loop;
     src.playbackRate.value = opts.rate ?? 1;
     const gain = ctx.createGain();
