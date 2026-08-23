@@ -100,16 +100,22 @@ checkVR();
 
 btnVR.addEventListener('click', async () => {
   try {
-    await audio.init();
+    btnVR.disabled = true;
+    btnVR.textContent = 'Entering…';
+    // requestSession FIRST, while the click's transient activation is fresh —
+    // synthesizing the sample library can take long enough on a slow CPU to
+    // lose the user-gesture window. Audio builds while the headset fades up.
     // no 'hand-tracking': XRHand only implements controller input, and a
     // requested-but-dead feature strands hands-only players in a frozen void.
     // Ask again when pinch-grab actually exists.
     xrSession = await navigator.xr.requestSession('immersive-vr', {
       optionalFeatures: ['local-floor', 'bounded-floor'],
     });
+    audio.init().then(() => { if (xrSession) audio.setActive(true); });
     xrSession.addEventListener('end', () => {
       xrSession = null;
       overlay.classList.remove('hidden');
+      btnVR.disabled = false;
       btnVR.textContent = 'Start VR';
       // back at the menu: don't leave desert wind playing in the flat tab
       audio.setActive(false);
@@ -122,9 +128,9 @@ btnVR.addEventListener('click', async () => {
     floorCheck = 2.0;
     await renderer.xr.setSession(xrSession);
     overlay.classList.add('hidden');
-    audio.setActive(true);
   } catch (err) {
     console.error('Failed to start VR session:', err);
+    btnVR.disabled = false;
     btnVR.textContent = 'VR failed to start';
     audio.setActive(false);
   }
@@ -132,9 +138,13 @@ btnVR.addEventListener('click', async () => {
 
 async function startDesktop(withPointerLock) {
   attractStop();
-  await audio.init();
-  audio.setActive(true);
+  // drop the player in immediately; the sample library synthesizes in the
+  // background and the wind fades up whenever it's ready
   overlay.classList.add('hidden');
+  audio.init().then(() => {
+    if (!overlay.classList.contains('hidden')) return; // bailed back to menu
+    audio.setActive(true);
+  });
   if (params.get('demo')) return; // spectator mode: no controls fighting the orbit
   if (!interactions.desktop) {
     interactions.desktop = new DesktopControls(interactions);

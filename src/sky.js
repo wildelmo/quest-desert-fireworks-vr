@@ -555,9 +555,11 @@ function createMountains() {
     const posAttr = new Float32Array(verts);
     geo.setAttribute('position', new THREE.BufferAttribute(posAttr, 3));
     // atmospheric perspective: ridgelines dissolve slightly into the sky
-    // glow instead of cutting a hard cardboard edge against it
+    // glow instead of cutting a hard cardboard edge against it. The dissolve
+    // target must be the dome's own warm horizon tone — a cool blue lifts
+    // the ridge BRIGHTER than the sky behind it and reads as paper cutouts.
     const base = new THREE.Color(color);
-    const top = base.clone().lerp(new THREE.Color(0x232338), 0.55);
+    const top = base.clone().lerp(new THREE.Color(0x191410), 0.45);
     const cols = new Float32Array(posAttr.length);
     const cTmp = new THREE.Color();
     for (let k = 0; k < posAttr.length; k += 3) {

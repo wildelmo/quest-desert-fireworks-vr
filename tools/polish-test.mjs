@@ -14,7 +14,23 @@ page.on('pageerror', (e) => errors.push(String(e)));
 page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
 
 await page.goto('http://localhost:8080/?autostart=desktop', { waitUntil: 'load' });
-await page.waitForFunction(() => window.__app?.audio?.ready, { timeout: 30000 });
+const t0 = Date.now();
+try {
+  // NB: waitForFunction(fn, ARG, options) — options is the third parameter
+  await page.waitForFunction(() => window.__app?.audio?.ready, undefined, { timeout: 120000, polling: 500 });
+} catch (e) {
+  const probe = await page.evaluate(() => ({
+    app: !!window.__app,
+    audio: !!window.__app?.audio,
+    ctx: !!window.__app?.audio?.ctx,
+    ready: window.__app?.audio?.ready,
+    overlayHidden: document.getElementById('overlay')?.classList.contains('hidden'),
+  })).catch((err) => String(err));
+  console.error(`audio never became ready after ${Date.now() - t0} ms; probe:`, JSON.stringify(probe));
+  console.error('page errors so far:', errors.length ? errors.join('\n') : 'none');
+  await browser.close();
+  process.exit(1);
+}
 await page.waitForTimeout(1000);
 
 const results = await page.evaluate(async () => {
