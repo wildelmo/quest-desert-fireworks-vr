@@ -289,6 +289,7 @@ export class AudioEngine {
     if (!buf) return null;
     const ctx = this.ctx;
     const dist = this.listenerPos.distanceTo(position);
+    const ref = opts.refDistance ?? 4;
 
     // voice cap: past VOICE_CAP live one-shots, refuse the quietest
     // newcomers instead of letting the brick-wall limiter apologize for
@@ -316,7 +317,7 @@ export class AudioEngine {
     // pile up 20+ voices and equalpower is indistinguishable at range.
     panner.panningModel = opts.hrtf ? 'HRTF' : 'equalpower';
     panner.distanceModel = 'inverse';
-    panner.refDistance = opts.refDistance ?? 4;
+    panner.refDistance = ref;
     panner.rolloffFactor = 1;
     panner.positionX.value = position.x;
     panner.positionY.value = position.y;
@@ -338,17 +339,22 @@ export class AudioEngine {
     gain.connect(panner);
     panner.connect(this.master);
 
-    // Reverb send taps PRE-panner. Post-panner the wet rode the panner's
-    // rolloff — distant shells got LESS reverb than near ones (backwards)
+    // Reverb send taps PRE-panner. Post-panner the wet/dry ratio stayed
+    // flat with distance — distant shells got no extra echo (backwards)
     // and the wet image collapsed onto the dry pan instead of staying a
-    // diffuse field. The explicit curve replaces the rolloff: flat inside
-    // ~21 m, growing to 2.6x by ~90 m — dry falls with distance, wet
-    // holds, so the far field turns mostly-echo the way a real valley
-    // does. The short pre-delay is the extra wall-path: farther shells'
-    // mesa slapback lags more (distance at spawn; good enough — nothing
+    // diffuse field. The send now applies the panner's rolloff by hand
+    // (att — same inverse model, so absolute wet still decays) TIMES a
+    // growth curve: flat inside ~21 m, up 2.6x by ~90 m. Net: wet falls
+    // ~13 dB slower than dry, and a 100 m break is mostly mesa answer
+    // the way a real valley break is. (Measured: dropping att entirely
+    // put the far-field wet +30 dB over the tuned mix and pinned the
+    // limiter — the growth curve must ride the rolloff, not replace it.)
+    // The short pre-delay is the extra wall-path: farther shells'
+    // slapback lags more (distance at spawn; good enough — nothing
     // audible moves 30 m mid-sample).
+    const att = ref / Math.max(dist, ref);
     const send = ctx.createGain();
-    send.gain.value = (opts.send ?? 0.25) * clamp(dist / 35, 0.6, 2.6);
+    send.gain.value = (opts.send ?? 0.25) * att * clamp(dist / 35, 0.6, 2.6);
     const pre = ctx.createDelay(0.4);
     pre.delayTime.value = Math.min(0.35, (dist / SPEED_OF_SOUND) * 0.15);
     gain.connect(send);

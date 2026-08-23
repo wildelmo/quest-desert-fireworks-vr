@@ -78,11 +78,16 @@ Loaded into a single `ConvolverNode` shared by every sound in the scene
 AudioBufferSource (random pre-rendered variant matching size tier)
   → [optional distance lowpass, only active beyond 80m]
   → per-voice GainNode
-  → PannerNode (equalpower panning, NOT HRTF — HRTF is too CPU-heavy once
-                20+ voices stack during a finale;
-                distanceModel: inverse, refDistance: 12, rolloffFactor: 1)
-      ├── straight to master bus (dry)
-      └── through a send-gain → shared ConvolverNode → wet gain (0.9) → master bus
+      ├── PannerNode (equalpower panning, NOT HRTF — HRTF is too CPU-heavy once
+      │               20+ voices stack during a finale;
+      │               distanceModel: inverse, refDistance: 12, rolloffFactor: 1)
+      │     → master bus (dry, panned)
+      └── send-gain (pre-panner, scaled by distance: attenuation × a curve that
+          GROWS with range, so far shells arrive wetter — real acoustics — while
+          the floor of the curve keeps the close mix identical)
+          → per-voice pre-delay (distance/340 × 0.15, capped 0.35 s — the mesa
+            slapback lags farther shells)
+          → shared ConvolverNode → wet gain (1.5) → master bus
 ```
 
 Parameters actually used (`audio.js:302-334`, `boom()`):

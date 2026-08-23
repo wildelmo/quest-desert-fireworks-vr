@@ -524,10 +524,9 @@ export class FinaleShow {
       // arrives out of silence), a lyrical window where ONE big shell owns
       // the sky, and a four-bar double-time sprint around T(32) before the
       // second rest. Scene length and the anchor cadence are untouched.
-      const rests = [T(20.9), T(34.0)];
-      let restI = 0;
       const LYRIC = [T(23.9), T(27.1)]; // held for the lone scarlet peony
       let bar = T(15.6), k = 0, sprintBars = -1; // -1 armed, 4..1 running, 0 spent
+      let rested1 = false, rested2 = false;
       while (bar < T(43.5)) {
         // a bar that would collide with an all-pad hit steps past it — the
         // hit takes that beat, the pulse never stops
@@ -535,9 +534,9 @@ export class FinaleShow {
         if (hit) bar = hit + randRange(1.2, 1.5);
         if (bar >= LYRIC[0] && bar < LYRIC[1]) bar = LYRIC[1] + randRange(0, 0.2);
         // the double-time passage: exactly FOUR bars at half stride, armed
-        // by the first bar past T(30.4) — a window test here let a bar at
-        // 30.3 stride 1.6 s across half the passage
-        if (sprintBars < 0 && bar >= T(30.4)) sprintBars = 4;
+        // by the first bar past T(30) — a window test here let a bar at
+        // 30.3 stride a full 1.6 s across half the passage
+        if (sprintBars < 0 && bar >= T(30.0)) sprintBars = 4;
         const sprint = sprintBars > 0;
         if (sprint) sprintBars--;
         const pal = (bar < T(30) ? ROT_A : ROT_B)[k % 4];
@@ -567,10 +566,11 @@ export class FinaleShow {
         if (k % 5 === 3) this._mineFront(bar + 0.5, [9 + (k % 5)], { palette: pal, size: 0.8, lifts: 1 });
         k++;
         bar += sprint ? randRange(0.72, 0.88) : randRange(1.45, 1.75); // on the beat, never on a grid
-        if (restI < rests.length && bar >= rests[restI]) {
-          bar += randRange(1.2, 1.5); // the rest: a real hole in the pulse
-          restI++;
-        }
+        // the two written rests — real holes in the pulse: one right
+        // before hit 1 (the hit lands out of silence), one straight after
+        // the sprint spends itself (sprint, then hold the breath)
+        if (!rested1 && bar >= T(20.9)) { bar += randRange(1.2, 1.5); rested1 = true; }
+        if (!rested2 && sprintBars === 0) { bar += randRange(1.2, 1.5); rested2 = true; }
       }
       // the lyrical bar: one big scarlet peony fired into the held gap —
       // the only break in its ±1.2 s window, the tide taking one breath
