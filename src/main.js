@@ -10,6 +10,7 @@ import { FireworksSystem } from './fireworks.js';
 import { createWorld } from './world.js';
 import { COLOSSUS_POS } from './colossus.js';
 import { Interactions, XRHand, DesktopControls } from './input.js';
+import { WIND } from './wind.js';
 import { randRange, randPick, clamp } from './utils.js';
 
 const params = new URLSearchParams(location.search);
@@ -112,9 +113,13 @@ btnVR.addEventListener('click', async () => {
       btnVR.textContent = 'Start VR';
       // back at the menu: don't leave desert wind playing in the flat tab
       audio.setActive(false);
+      floorOffset = 0;
+      floorCheck = 0;
       attractStart();
     });
     attractStop();
+    floorOffset = 0;
+    floorCheck = 2.0;
     await renderer.xr.setSession(xrSession);
     overlay.classList.add('hidden');
     audio.setActive(true);
@@ -271,7 +276,7 @@ if (params.get('autostart') === 'desktop' || params.get('demo')) {
 }
 
 // expose for tests / tinkering
-window.__app = { scene, camera, player, renderer, fireworks, world, audio, pool, interactions, THREE };
+window.__app = { scene, camera, player, renderer, fireworks, world, audio, pool, interactions, WIND, THREE };
 
 // the menu is up on load: let the desert perform behind it
 attractStart();
@@ -282,15 +287,32 @@ attractStart();
 const clock = new THREE.Clock();
 const _headWorld = new THREE.Vector3();
 let time = 0;
+let floorOffset = 0;  // rig lift when the runtime lacks a floor reference
+let floorCheck = 0;   // countdown to the one-shot head-height sanity sample
 
 renderer.setAnimationLoop(() => {
   const dt = Math.min(clock.getDelta(), 0.05);
   time += dt;
 
-  // keep the rig glued to the dunes under the head
+  // keep the rig glued to the dunes under the head. Small steps are
+  // rate-capped so dune-walking reads as gentle swell, not head bob; big
+  // jumps (teleports) still snap at full lerp speed.
   camera.getWorldPosition(_headWorld);
-  const targetY = terrainHeight(_headWorld.x, _headWorld.z);
-  player.position.y += (targetY - player.position.y) * Math.min(1, dt * 12);
+  const targetY = terrainHeight(_headWorld.x, _headWorld.z) + floorOffset;
+  let dy = (targetY - player.position.y) * Math.min(1, dt * 12);
+  if (Math.abs(targetY - player.position.y) < 2) {
+    dy = clamp(dy, -2.2 * dt, 2.2 * dt);
+  }
+  player.position.y += dy;
+
+  // floor-reference fallback: if the runtime refused 'local-floor', head
+  // poses arrive near y=0 and the player's eyes end up in the sand. Sample
+  // the local head height a moment into the session; if it's implausibly
+  // low for a tracked human, lift the rig by a standing eye height.
+  if (renderer.xr.isPresenting && floorCheck > 0) {
+    floorCheck -= dt;
+    if (floorCheck <= 0 && camera.position.y < 0.5) floorOffset = 1.6;
+  }
 
   world.update(dt, time);
   fireworks.update(dt, time);
