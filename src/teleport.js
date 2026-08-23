@@ -13,6 +13,7 @@ import * as THREE from 'three';
 import { terrainHeight } from './terrain.js';
 import { randRange } from './utils.js';
 import { CELL } from './particles.js';
+import { comfort } from './input.js'; // blink fade + arrival haptics
 
 const _v1 = new THREE.Vector3();
 const _v2 = new THREE.Vector3();
@@ -164,6 +165,10 @@ export class TeleportRing {
       this.audio.play('whoosh', _v2, { gain: 0.9, rate: 1.1, refDistance: 4 });
       this.audio.play('thud', _v2, { gain: 0.5, rate: 1.3, refDistance: 3 });
     }
+    // comfort blink covers the arrival (the move above stays synchronous —
+    // callers and tests read the new pose the moment this returns) and both
+    // hands get the landing thump
+    comfort.teleported();
     return true;
   }
 
