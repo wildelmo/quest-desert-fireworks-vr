@@ -108,12 +108,28 @@ Parameters actually used (`audio.js:302-334`, `boom()`):
 Master GainNode (0.85)
   → Lowshelf filter (110 Hz, +4.5 dB)   ← adds "chest" sub-bass weight
   → DynamicsCompressor (threshold -12dB, knee 24, ratio 3.5,
-                         attack 6ms, release 300ms)
+                         attack 6ms, release 300ms)     ← the "glue"
+  → DynamicsCompressor (threshold -2dB, knee 0, ratio 20,
+                         attack 1ms, release 120ms)     ← brick-wall limiter
+  → tanh soft-clip WaveShaper (identity below 0.8,
+                                asymptote ±1)            ← sample-accurate ceiling
   → destination
 ```
 
-The compressor is what lets many simultaneous booms during a finale glue
-together without clipping or fighting each other.
+The glue compressor is what lets many simultaneous booms during a finale
+sit together without fighting each other; the limiter catches the summed
+finale level. Neither is sample-accurate though — the limiter's 1 ms
+attack still passes stacked salvo transients over 0 dBFS, which the DAC
+would hard-clip into crackle — so a waveshaper ends the chain: no attack,
+no release, cannot pump, and not one sample escapes past ±1.
+
+Two engine-level guards matter as much as the chain: live one-shot voices
+are hard-capped (least-audible voice evicted when a stronger one arrives)
+so a finale pileup can't starve the device's audio thread into dropouts,
+and the context asks for ~80 ms of output latency instead of the platform
+minimum — nothing here needs tight latency (the booms are deliberately
+200-400 ms late for speed of sound), and the slack is what keeps a burst
+of node setup from underrunning the stream on a Quest.
 
 ## Condensed version, for briefing another LLM/coding assistant
 

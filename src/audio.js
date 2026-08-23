@@ -18,10 +18,21 @@ import {
 
 const SPEED_OF_SOUND = 340;
 
-// live one-shot voices allowed before new low-priority plays are refused —
-// beyond this the belt/finale pileups were only "surviving" because the
-// brick-wall limiter apologized for them
-const VOICE_CAP = 48;
+// Live one-shot voices allowed before the engine RECLAIMS the least
+// audible one. This is a hard bound, not a request gate: the finale was
+// sustaining 40-51 live voices (boom buffers run 3.3-4.8 s, so voices
+// stack at ~4x the play rate) — enough graph weight that the Quest audio
+// thread misses render deadlines and the output stream underruns. That
+// underrun IS the mid-show audio cutout: the offline show render proves
+// the mix itself never dips, so the silence had to be the delivery, not
+// the signal. 32 keeps the roar (the demotion pass already showed a
+// pileup can lose voices inaudibly) while capping worst-case DSP load
+// well under where the dropouts lived.
+const VOICE_CAP = 32;
+// age constant for eviction ranking: a boom's report decays into rumble
+// tail with tau around a second, so an old voice's claim on a slot fades
+// on the same clock its audibility does
+const VOICE_AGE_TAU = 1.5;
 
 export class AudioEngine {
   constructor() {
@@ -42,7 +53,13 @@ export class AudioEngine {
   async init() {
     if (this.ctx) return;
     const ctx = new (window.AudioContext || window.webkitAudioContext)({
-      latencyHint: 'interactive',
+      // ~80 ms output buffer instead of 'interactive' (the platform
+      // minimum). Nothing here needs tight latency — the booms are
+      // *deliberately* 200-400 ms late (speed of sound) and the foley is
+      // ambient — but the small 'interactive' quantum left the Quest
+      // audio thread no slack, so a finale-sized burst of node setup
+      // work underran the stream: heard as the audio cutting out.
+      latencyHint: 0.08,
     });
     this.ctx = ctx;
 
@@ -80,10 +97,38 @@ export class AudioEngine {
     this.limiter.attack.value = 0.001;
     this.limiter.release.value = 0.12;
 
+    // Sample-accurate ceiling after the limiter. Even at ratio 20 the
+    // limiter's 1 ms attack lets stacked salvo transients through past
+    // 0 dBFS (measured across a full offline show render: ~27k samples
+    // over full scale, all in the loudest seconds) and the DAC hard-clips
+    // them into crackle. A waveshaper has no attack or release — it can
+    // neither pump nor let a single sample escape. The curve is identity
+    // below 0.8 (the limiter already parks program peaks near -2 dB, so
+    // ordinary material passes untouched) with a tanh knee easing into a
+    // ±1 asymptote; the 0.5 pre-gain widens the shaper's input domain to
+    // ±2 so overshoots are shaped, not clamped at the table edge.
+    this.clipIn = ctx.createGain();
+    this.clipIn.gain.value = 0.5;
+    this.clip = ctx.createWaveShaper();
+    {
+      const N = 2049; // odd: an exact center sample keeps 0 -> 0
+      const curve = new Float32Array(N);
+      for (let i = 0; i < N; i++) {
+        const x = ((i / (N - 1)) * 2 - 1) * 2; // input, pre-gain undone
+        const a = Math.abs(x);
+        const y = a <= 0.8 ? a : 0.8 + 0.2 * Math.tanh((a - 0.8) / 0.2);
+        curve[i] = Math.sign(x) * y;
+      }
+      this.clip.curve = curve;
+      this.clip.oversample = 'none'; // engages only at the top ~2 dB
+    }
+
     this.master.connect(this.shelf);
     this.shelf.connect(this.comp);
     this.comp.connect(this.limiter);
-    this.limiter.connect(ctx.destination);
+    this.limiter.connect(this.clipIn);
+    this.clipIn.connect(this.clip);
+    this.clip.connect(ctx.destination);
 
     // shared desert reverb
     this.convolver = ctx.createConvolver();
@@ -285,24 +330,32 @@ export class AudioEngine {
    */
   play(name, position, opts = {}) {
     if (!this.ready) return null;
+    // a non-finite position or gain would ride the graph into the shared
+    // convolver and master filters — refuse it before it becomes sound
+    if (!Number.isFinite(position.x + position.y + position.z)
+      || !Number.isFinite(opts.gain ?? 1)) return null;
     const buf = this._buffer(name);
     if (!buf) return null;
     const ctx = this.ctx;
     const dist = this.listenerPos.distanceTo(position);
     const ref = opts.refDistance ?? 4;
+    const att = ref / Math.max(dist, ref);
 
-    // voice cap: past VOICE_CAP live one-shots, refuse the quietest
-    // newcomers instead of letting the brick-wall limiter apologize for
-    // the pileup. Loops are exempt — they are few, persistent beds.
+    // Voice cap — a hard bound this time. The old check refused only
+    // newcomers quieter than the QUIETEST live voice and never evicted,
+    // so the moment a mix of lifts and sizzle tails was live, every new
+    // boom sailed past the cap and the finale stacked 50+ voices — the
+    // audio-thread overload heard as the show's audio cutouts. Now a
+    // full house means someone leaves: the least audible voice (rank =
+    // requested gain x distance attenuation, decaying with age as its
+    // report rolls off into tail) is faded out to make room, or the
+    // newcomer is refused if it wouldn't outrank anyone. Loops are
+    // exempt — they are few, persistent beds.
     let voice = null;
     if (!opts.loop) {
-      const pri = opts.priority ?? opts.gain ?? 1;
-      if (this._voices.size >= VOICE_CAP) {
-        let min = Infinity;
-        for (const v of this._voices) if (v.pri < min) min = v.pri;
-        if (pri <= min) return null;
-      }
-      voice = { pri };
+      const pri = (opts.priority ?? opts.gain ?? 1) * att;
+      if (this._voices.size >= VOICE_CAP && !this._evict(pri)) return null;
+      voice = { pri, t0: ctx.currentTime };
       this._voices.add(voice);
     }
 
@@ -352,7 +405,6 @@ export class AudioEngine {
     // The short pre-delay is the extra wall-path: farther shells'
     // slapback lags more (distance at spawn; good enough — nothing
     // audible moves 30 m mid-sample).
-    const att = ref / Math.max(dist, ref);
     const send = ctx.createGain();
     send.gain.value = (opts.send ?? 0.25) * att * clamp(dist / 35, 0.6, 2.6);
     const pre = ctx.createDelay(0.4);
@@ -393,6 +445,17 @@ export class AudioEngine {
         lpNode?.frequency.setTargetAtTime(v, ctx.currentTime, 0.15);
       },
     };
+    if (voice) {
+      // eviction path: a fast fade, then the source stops and onended
+      // tears the nodes down — the slot is free immediately, the DSP
+      // cost is gone within ~100 ms
+      voice.kill = () => {
+        try {
+          gain.gain.setTargetAtTime(0, ctx.currentTime, 0.012);
+          src.stop(ctx.currentTime + 0.06);
+        } catch { /* already stopped */ }
+      };
+    }
     src.onended = () => {
       if (voice) this._voices.delete(voice);
       try {
@@ -400,6 +463,24 @@ export class AudioEngine {
       } catch { /* noop */ }
     };
     return handle;
+  }
+
+  /** Reclaim the least audible live one-shot if the newcomer (priority
+   *  `pri`) outranks it. True = a slot was freed. Rank decays with age:
+   *  a three-second-old boom is rumble tail, not report, and its claim
+   *  on a voice slot fades on the same clock. */
+  _evict(pri) {
+    const now = this.ctx.currentTime;
+    let worst = null;
+    let worstPri = Infinity;
+    for (const v of this._voices) {
+      const p = v.pri * Math.exp(-Math.max(0, now - v.t0) / VOICE_AGE_TAU);
+      if (p < worstPri) { worstPri = p; worst = v; }
+    }
+    if (!worst || worstPri >= pri) return false;
+    this._voices.delete(worst);
+    worst.kill?.();
+    return true;
   }
 
   // Non-positional (ambience / UI)
@@ -460,8 +541,13 @@ export class AudioEngine {
         gain: 1.4, rate: 0.95 + Math.random() * 0.1,
         send: 0.4, delayBySound: true, refDistance: 10, startDelay: 0.12,
       });
-    } else if (size > 0.7) {
+    } else if (size > 0.7 && this._voices.size < VOICE_CAP * 0.75) {
       // big shells leave a faint sizzle of burning stars after the report
+      // — a decoration, so it stands down first: once the engine is 3/4
+      // full of live voices (salute chains, the wall) every big report
+      // towing a +1 voice tail is exactly the pileup that used to starve
+      // the Quest audio thread, and under that much roar the sizzle was
+      // masked anyway
       this.play('crackle', position, {
         gain: 0.45, rate: 0.78 + Math.random() * 0.08,
         send: 0.35, delayBySound: true, refDistance: 10, startDelay: 0.25,
