@@ -1165,7 +1165,7 @@ function buildMesas(scene) {
   const PROFILE = [
     [1.0, 1.0], [1.08, 0.78], [1.26, 0.36], [1.9, 0.09], [2.8, 0],
   ];
-  const N = 16;
+  const N = 18;
   const APRON_Y = -55; // below any possible dune hollow on the sightline
   const positions = [];
   const colors = [];
@@ -1719,7 +1719,7 @@ export function createWorld(scene, fireworks, pool, audio) {
 
       // wind-blown dust: long-lived near-transparent grains drifting through
       // the play area — felt, not seen; density surges with the gusts
-      dustAcc += dt * (9 + 9 * windGust());
+      dustAcc += dt * (10 + 8 * windGust());
       const dn = Math.floor(dustAcc);
       dustAcc -= dn;
       if (dn > 0) {
