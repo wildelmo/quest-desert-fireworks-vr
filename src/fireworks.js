@@ -2776,7 +2776,7 @@ export class FireworksSystem {
   // The torch is CLOSE: the tip cooks and throws a couple of anticipation
   // sparks before it actually catches (driven by item.fuseGlow, 0..1).
   spawnFuseGlowSparks(item, pos, time, dt, glow) {
-    item._fuseAcc = (item._fuseAcc ?? Math.random()) + dt * 10 * glow;
+    item._fuseAcc = (item._fuseAcc ?? Math.random()) + dt * 14 * glow;
     const n = Math.floor(item._fuseAcc);
     item._fuseAcc -= n;
     if (n <= 0) return;
