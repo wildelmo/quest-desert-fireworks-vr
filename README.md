@@ -1,11 +1,12 @@
 # Desert Fireworks VR 🎆
 
 A WebXR fireworks sandbox for **Meta Quest** (built and tuned for Quest 3). You're alone in a
-wide-open desert at night — moonlit dunes, a huge starfield, distant mesas — with a supply
-crate that never runs out of fireworks, and a burning torch.
+wide-open desert at night — moonlit dunes, a huge starfield, distant mesas, a campfire
+snapping at the edge of camp — with a supply crate that never runs out of fireworks, and a
+burning torch.
 
 Grab a rocket. Push its stick into the sand at whatever angle you like. Touch the torch
-flame to the fuse. Step back.
+flame to the fuse. Step back. (Or don't plant it at all — light it and *throw* it.)
 
 ![campsite](docs/campsite.png)
 ![burst](docs/burst.png)
@@ -102,11 +103,18 @@ The game is a static web page — WebXR needs a **secure (HTTPS) origin**, so ei
 
 **Controls (VR)**
 
-- **Grip** (or trigger) — grab a firework / the torch; grab with the other hand to pass
-- **Release near the sand** — plants it at exactly the angle you're holding it (a green ring shows when planting is possible)
-- **Torch flame → fuse** — lights it; the fuse sputters for a couple of seconds, so *step back*
-- **Left stick** — walk · **Right stick** — snap turn
-- Booms thump both controllers, scaled by how close you (unwisely) stood
+- **Grip** (or trigger) — grab a firework / the torch; grab with the other hand to pass. A soft
+  glow ring marks whatever your hand would take
+- **Release near the sand** — plants it at exactly the angle you're holding it (the ghost ring
+  shows green when the plant will take, red when it won't)
+- **Throw it** — anything you're holding inherits your arm's full velocity and spin, tumbles,
+  bounces once and settles; a lit fountain keeps erupting through the whole arc
+- **Torch flame → fuse** — lights it; the flame is forgiving (a sweep counts), the fuse tip
+  brightens as you close in, and your holding hand feels the catch — then a rising burn
+  rumble, so *step back or throw*
+- **Left stick** — walk (with a comfort vignette; `?comfort=0` to disable) · **Right stick** — snap turn
+- Booms thump both controllers on the true sound-arrival clock, scaled by how close you
+  (unwisely) stood
 
 ### On a desktop browser
 
@@ -127,6 +135,9 @@ Hann-windowed grains, pitched up, overlap-added) into its turbulence bed.
 
 - a boom is a Friedlander blast pulse + its ground bounce, the recorded body tilted
   dark by air absorption, an LF chest-thump pulse, and a long rolling brown-noise rumble;
+- handling is scored too: paper wrappers rustle when you take them, planting crunches
+  into the sand, the torch re-stakes with a wooden knock, big show shells ride up on a
+  quiet whoosh and the serpents scream a falling riser whistle;
 - the launch swoosh peaks in ~15 ms (a real motor comes up to pressure instantly),
   then amplitude and brightness recede together as the rocket leaves — ignition spit,
   granulated turbulence, collapsing-lowpass hiss, pad rumble and propellant sizzle;
@@ -139,9 +150,11 @@ Hann-windowed grains, pitched up, overlap-added) into its turbulence bed.
   so the rattle travels in 3D;
 - the waterfall curtains hang on a molten-sizzle loop: frying-hiss, dense micro-crackle
   and a soft mid roar, darkened by distance;
-- everything plays through HRTF panners with **true speed-of-sound delay**
+- everything plays through positional panners with **true speed-of-sound delay**
   (a shell bursting 150 m up arrives ~0.4 s after the flash) plus a synthesized
-  "open desert with distant rock faces" impulse response in a shared convolver.
+  "open desert with distant rock faces" impulse response in a shared convolver —
+  fed **pre-panner and scaled up with distance**, so far shells arrive *wetter*
+  with a lagging mesa slapback, the way real ones do.
 
 Several seeded variants of each sample plus randomized playback rate mean no two shots
 sound identical. Headphones (or the Quest's speakers, up loud) strongly recommended.
@@ -171,8 +184,15 @@ To audition any recipe without a headset: `node tools/render-sounds.mjs out whoo
   view-dependent glitter term injected into the standard shader — head sway makes the
   dunes sparkle, and burst light makes them shimmer.
 - Burst flash lights are pooled `PointLight`s that paint the dunes with the shell's
-  color (fountain lights are pooled too — changing the scene's light count mid-show
-  forces a shader recompile hitch on Quest, so the light count never changes).
+  color — eight shell slots with weakest-first eviction so a grand kamuro keeps its
+  four-second afterglow through a nine-pad salvo, a two-light utility pool for
+  lifts and cake shots, four flickering fuse lights, and the campfire (changing the
+  scene's light count mid-show forces a shader recompile hitch on Quest, so every
+  light exists from startup and the count never changes).
+- One shared **wind** vector drives everything that drifts — burst smoke, pad haze,
+  campfire embers, dust motes, swaying scrub, even the gusting of the audio wind
+  bed — and the sand remembers the night: scorch rings under pads and spent shells,
+  embers that fall all the way back, charred husks and sticks, red paper litter.
 - The Colossus (`src/colossus.js`) is ~26 draw calls and ~12k triangles: every truss
   member is an instanced bar, the marker lamps are two shader-driven point clouds,
   and its fires ride the shared particle pool. Its spin integrates drive torque
