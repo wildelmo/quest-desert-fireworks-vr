@@ -6,8 +6,9 @@
 // the terrain with color on every burst.
 
 import * as THREE from 'three';
-import { randRange, randPick, clamp } from './utils.js';
+import { randRange, randPick, clamp, mulberry32 } from './utils.js';
 import { CELL } from './particles.js';
+import { WIND } from './wind.js';
 
 // Colorways matched to a classic display photo: a huge amber-gold
 // chrysanthemum, scarlet shells with pale pink tips, teal/aqua shells (one
@@ -113,6 +114,12 @@ const _bp = new THREE.Vector3();
 const _bt = new THREE.Vector3();
 const _bn = new THREE.Vector3();
 const _bd = new THREE.Vector3();
+// fuse + item-flight scratch (item.update runs inside frames that already
+// lean on _v1.._v4)
+const _fv1 = new THREE.Vector3();
+const _fv2 = new THREE.Vector3();
+const _fv3 = new THREE.Vector3();
+const _fq = new THREE.Quaternion();
 
 // Where a drag-integrated particle will be after t seconds (matches shader).
 function ballistic(p0, v0, t, gravity, drag, out) {
@@ -200,6 +207,12 @@ const SELF_TEXTURED = new Set(['thousandbloom', 'bees', 'fish', 'dragoneggs',
 const BOUNCE_RESTITUTION = 0.42;
 const BOUNCE_DAMPING = 0.72;
 
+// Thrown items hit softer than comet stars: cardboard on sand barely skips,
+// and most of the slide dies in the grit on first contact.
+const ITEM_RESTITUTION = 0.25;
+const ITEM_FRICTION = 0.62;      // tangential speed kept per ground hit
+const ITEM_DRAG_K = 0.05;        // quadratic air drag (tumbling cardboard)
+
 // ---------------------------------------------------------------------------
 // Pooled burst flash lights — these are what paint the dunes with color.
 // Real bursts light the ground in two phases: a hard white-hot pop at the
@@ -219,16 +232,26 @@ class FlashPool {
         hot: new THREE.Color(), tail: new THREE.Color(),
       });
     }
-    this.cursor = 0;
   }
 
   /**
    * sink: how fast the light drifts downward (m/s) — burning stars fall,
    * and the pool of light on the sand should follow them.
+   *
+   * Slot policy: free slot first; otherwise evict whichever flash has the
+   * least light LEFT in it (peak scaled by its remaining envelope) — and
+   * refuse outright if the newcomer is dimmer than that. A grand shell's
+   * four-second afterglow can no longer be round-robined away by a volley
+   * of muzzle pops.
    */
   flash(pos, color, intensity, dur = 0.45, sink = 0) {
-    const slot = this.lights[this.cursor];
-    this.cursor = (this.cursor + 1) % this.lights.length;
+    let slot = null, weakest = Infinity;
+    for (const s of this.lights) {
+      if (s.peak === 0) { slot = s; break; }
+      const left = s.peak * Math.max(0, 1 - s.t / s.dur);
+      if (left < weakest) { weakest = left; slot = s; }
+    }
+    if (slot.peak !== 0 && intensity <= weakest) return; // dimmer than everything burning
     slot.light.position.copy(pos);
     slot.tail.set(color);
     // the break itself is nearly white; it cools into the star color
@@ -262,7 +285,7 @@ class FlashPool {
 // flare (a real streak-flare texture) — together they read like the blown-out
 // frame a camera catches at the instant of the break.
 class FlashSprites {
-  constructor(scene, count = 4) {
+  constructor(scene, count = 4, atlas = null) {
     const c = document.createElement('canvas');
     c.width = c.height = 64;
     const g = c.getContext('2d');
@@ -273,7 +296,19 @@ class FlashSprites {
     g.fillStyle = grad;
     g.fillRect(0, 0, 64, 64);
     const tex = new THREE.CanvasTexture(c);
-    const flareTex = new THREE.TextureLoader().load('assets/textures/particles/flare_01.png');
+    // the particle atlas already carries flare_01 in its FLASH cell — window
+    // a clone onto that region instead of fetching + uploading the PNG a
+    // second time (clones share the Source, so the GPU holds one copy; the
+    // streak is vertically symmetric, so the atlas's flipY=false is moot)
+    let flareTex;
+    if (atlas) {
+      flareTex = atlas.clone();
+      flareTex.offset.set(0.75, 0.5); // CELL.FLASH: col 3, row 1 of the 4x2 grid
+      flareTex.repeat.set(0.25, 0.5);
+      flareTex.needsUpdate = true;
+    } else {
+      flareTex = new THREE.TextureLoader().load('assets/textures/particles/flare_01.png');
+    }
     this.sprites = [];
     for (let i = 0; i < count; i++) {
       const s = new THREE.Sprite(new THREE.SpriteMaterial({
@@ -290,12 +325,18 @@ class FlashSprites {
       scene.add(f);
       this.sprites.push({ sprite: s, flare: f, t: 1e9, dur: 0.35, from: 2, to: 20, fw: 10 });
     }
-    this.cursor = 0;
   }
 
   burst(pos, color, size) {
-    const s = this.sprites[this.cursor];
-    this.cursor = (this.cursor + 1) % this.sprites.length;
+    // same policy as the light pool: free slot, else the most-faded one —
+    // and a small flash never steals a big one mid-bloom
+    let s = null, weakest = Infinity;
+    for (const c of this.sprites) {
+      if (!c.sprite.visible) { s = c; break; }
+      const left = c.to * Math.max(0, 1 - c.t / c.dur);
+      if (left < weakest) { weakest = left; s = c; }
+    }
+    if (s.sprite.visible && 20 * size <= weakest) return;
     s.sprite.position.copy(pos);
     s.sprite.material.color.set(color);
     s.sprite.visible = true;
@@ -333,66 +374,370 @@ class FlashSprites {
   }
 }
 
+// Pooled fuse lights: a sputtering fuse must actually light the tube and the
+// hand holding it. Four small warm points, created at startup like every
+// other light here (visible at intensity 0 — see the FlashPool note),
+// acquired on ignite() and released the moment the item activates.
+class FuseLightPool {
+  constructor(scene, count = 4) {
+    this.slots = [];
+    for (let i = 0; i < count; i++) {
+      const l = new THREE.PointLight(0xffa14e, 0, 0.9, 2.0);
+      scene.add(l);
+      this.slots.push({ light: l, owner: null, phase: Math.random() * 9 });
+    }
+  }
+
+  acquire(item) {
+    for (const s of this.slots) {
+      if (!s.owner) { s.owner = item; return s; }
+    }
+    return null; // a fifth simultaneous fuse burns unlit — sparks still sell it
+  }
+
+  release(item) {
+    for (const s of this.slots) {
+      if (s.owner === item) {
+        s.owner = null;
+        s.light.intensity = 0;
+      }
+    }
+  }
+
+  update(time) {
+    for (const s of this.slots) {
+      if (!s.owner) continue;
+      s.owner.fuseWorldPos(_v1);
+      s.light.position.copy(_v1);
+      // sputter: fast flicker with occasional near-dropouts, like a real
+      // visco fuse choking on its own powder
+      const chug = Math.sin(time * 31 + s.phase) * 0.35 + Math.sin(time * 8.7 + s.phase * 2.3) * 0.25;
+      const dropout = Math.sin(time * 3.1 + s.phase) > 0.93 ? 0.25 : 1;
+      s.light.intensity = Math.max(0.3, (1.8 + chug * 1.4) * dropout);
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Item visuals
 
-// Printed wrapper art: colored bands with gold pinstripes, a starburst
-// emblem, and fake fine print — reads "fireworks stand" at arm's length
-// instead of "colored cylinder". One texture per palette (cached above).
-function labelTexture(palette) {
-  const W = 128, H = 256;
+// Printed wrapper art, one composition per KIND: rocket wrap, cake box art,
+// candle tube, fountain cone, belt band — each printing its real type label
+// ('Mammoth Rocket'…), house branding, the caution line, a lot number and
+// palette-accented trim. 512x1024 + anisotropy so the print survives being
+// held 20 cm from the lens. Deterministic per (type, palette): the same
+// wrapper off the same press run.
+const BRAND = 'DESERT BLOOM PYRO CO.';
+const CAUTION = 'LIGHT FUSE — RETIRE QUICKLY';
+
+function labelTexture(typeName, palette) {
+  const t = ITEM_TYPES[typeName];
+  const W = 512, H = 1024;
   const c = document.createElement('canvas');
   c.width = W; c.height = H;
   const g = c.getContext('2d');
   const colA = new THREE.Color(palette.a);
   const colB = new THREE.Color(palette.b);
   const css = (col, k = 1) => `rgb(${(col.r * 255 * k) | 0},${(col.g * 255 * k) | 0},${(col.b * 255 * k) | 0})`;
+  // per-press-run determinism: lot numbers, crookedness, wear all reproduce
+  let seed = 0;
+  const key = typeName + palette.name;
+  for (let i = 0; i < key.length; i++) seed = (seed * 31 + key.charCodeAt(i)) | 0;
+  const rand = mulberry32(seed >>> 0);
+  const lot = `LOT ${((rand() * 90 + 10) | 0)}-${((rand() * 900 + 100) | 0)} · NEC 1.4G`;
 
-  // aged paper
-  g.fillStyle = '#ded2b8';
+  // aged kraft base
+  g.fillStyle = '#dcd0b4';
   g.fillRect(0, 0, W, H);
+  // the whole print sits a hair crooked on the paper, like cheap offset work
+  g.save();
+  g.translate(W / 2, H / 2);
+  g.rotate((rand() - 0.5) * 0.02);
+  g.translate(-W / 2, -H / 2);
 
-  // main bands, dark-edged like cheap offset print
-  g.fillStyle = css(colA);
-  g.fillRect(0, 12, W, 52);
-  g.fillRect(0, H - 64, W, 52);
-  g.fillStyle = css(colA, 0.55);
-  for (const y of [12, 62, H - 64, H - 14]) g.fillRect(0, y, W, 3);
-  // gold pinstripes framing the middle
-  g.fillStyle = '#c9a544';
-  g.fillRect(0, 74, W, 3);
-  g.fillRect(0, H - 78, W, 3);
+  const starburst = (cx, cy, R, lw = 5) => {
+    g.strokeStyle = css(colB, 0.85);
+    g.lineWidth = lw;
+    for (let i = 0; i < 12; i++) {
+      const a = (i / 12) * Math.PI * 2;
+      const r0 = i % 2 ? R * 0.35 : R * 0.2, r1 = i % 2 ? R : R * 0.62;
+      g.beginPath();
+      g.moveTo(cx + Math.cos(a) * r0, cy + Math.sin(a) * r0);
+      g.lineTo(cx + Math.cos(a) * r1, cy + Math.sin(a) * r1);
+      g.stroke();
+    }
+    g.fillStyle = css(colA);
+    g.beginPath(); g.arc(cx, cy, R * 0.24, 0, Math.PI * 2); g.fill();
+  };
+  const finePrint = (x0, x1, y, rows) => {
+    g.fillStyle = 'rgba(60,45,25,0.55)';
+    for (let r2 = 0; r2 < rows; r2++) {
+      for (let x = x0; x < x1; x += 22) g.fillRect(x, y + r2 * 13, 13 + ((x * 7) % 8), 4);
+    }
+  };
+  // brand + caution + lot, shared footer/header voice across every wrapper
+  const stamps = (cx, yBrand, yCaution, yLot, scale = 1) => {
+    g.textAlign = 'center';
+    g.fillStyle = '#7a2f1a';
+    g.font = `bold ${(26 * scale) | 0}px Georgia, serif`;
+    g.fillText(BRAND, cx, yBrand);
+    g.fillStyle = '#4a3517';
+    g.font = `bold ${(21 * scale) | 0}px Georgia, serif`;
+    g.fillText(CAUTION, cx, yCaution);
+    g.font = `${(18 * scale) | 0}px Georgia, serif`;
+    g.fillStyle = 'rgba(60,45,25,0.8)';
+    g.fillText(lot, cx, yLot);
+  };
+  const title = (cx, cy, size, maxW) => {
+    g.textAlign = 'center';
+    g.fillStyle = '#2e2312';
+    g.font = `bold ${size}px Georgia, serif`;
+    const words = t.label.toUpperCase().split(' ');
+    // wrap to two lines when the name runs long (SKY ROCKET fits one)
+    if (g.measureText(t.label.toUpperCase()).width > maxW && words.length > 1) {
+      const half = Math.ceil(words.length / 2);
+      g.fillText(words.slice(0, half).join(' '), cx, cy - size * 0.55, maxW);
+      g.fillText(words.slice(half).join(' '), cx, cy + size * 0.65, maxW);
+    } else {
+      g.fillText(t.label.toUpperCase(), cx, cy, maxW);
+    }
+  };
 
-  // starburst emblem in the middle panel
-  const cx = W / 2, cy = H / 2;
-  g.strokeStyle = css(colB, 0.85);
-  g.lineWidth = 3;
-  for (let i = 0; i < 12; i++) {
-    const a = (i / 12) * Math.PI * 2;
-    const r0 = i % 2 ? 12 : 7, r1 = i % 2 ? 34 : 22;
-    g.beginPath();
-    g.moveTo(cx + Math.cos(a) * r0, cy + Math.sin(a) * r0);
-    g.lineTo(cx + Math.cos(a) * r1, cy + Math.sin(a) * r1);
-    g.stroke();
+  const kind = t.kind;
+  if (kind === 'cake') {
+    // box art: framed panel, the name in lights, a 3x3 tube chart, hazard tape
+    g.fillStyle = css(colA, 0.9);
+    g.fillRect(0, 0, W, 118);
+    g.fillRect(0, H - 118, W, 118);
+    g.fillStyle = '#d8b83a';
+    for (let x = -30; x < W; x += 60) { // chevrons
+      g.beginPath();
+      g.moveTo(x, 0); g.lineTo(x + 30, 0); g.lineTo(x + 60, 34); g.lineTo(x + 30, 34); g.fill();
+      g.beginPath();
+      g.moveTo(x + 30, H - 34); g.lineTo(x + 60, H - 34); g.lineTo(x + 30, H); g.lineTo(x, H); g.fill();
+    }
+    g.strokeStyle = '#c9a544';
+    g.lineWidth = 8;
+    g.strokeRect(36, 160, W - 72, H - 320);
+    starburst(W / 2, 400, 150, 8);
+    title(W / 2, 620, 64, W - 120);
+    g.fillStyle = css(colB, 0.9);
+    g.font = 'bold 40px Georgia, serif';
+    g.fillText(`${t.shots} SHOTS · FINALE GRADE`, W / 2, 705);
+    // the tube chart: nine dots, the firing order a buyer never reads
+    g.fillStyle = css(colA, 0.7);
+    for (let ix = 0; ix < 3; ix++) {
+      for (let iz = 0; iz < 3; iz++) {
+        g.beginPath(); g.arc(W / 2 - 70 + ix * 70, 760 + iz * 46, 14, 0, Math.PI * 2); g.fill();
+      }
+    }
+    stamps(W / 2, 145, H - 140, H - 168, 1.15);
+    finePrint(70, W - 70, 895, 2);
+  } else if (kind === 'candle') {
+    // barber-pole: the classic roman candle diagonals, title run vertically
+    g.fillStyle = css(colA);
+    g.save();
+    g.beginPath(); g.rect(0, 90, W, H - 180); g.clip();
+    for (let y = -W; y < H + W; y += 108) {
+      g.beginPath();
+      g.moveTo(0, y); g.lineTo(W, y - W); g.lineTo(W, y - W + 54); g.lineTo(0, y + 54);
+      g.fill();
+    }
+    g.restore();
+    g.fillStyle = css(colB, 0.9);
+    g.fillRect(0, 90, W, 10);
+    g.fillRect(0, H - 100, W, 10);
+    // title reads down the tube, twice around so any facing shows it
+    g.fillStyle = '#f4ecd8';
+    g.font = 'bold 46px Georgia, serif';
+    g.textAlign = 'center';
+    for (const cx of [W * 0.25, W * 0.75]) {
+      g.save();
+      g.translate(cx, H / 2);
+      g.rotate(Math.PI / 2);
+      g.fillText(t.label.toUpperCase(), 0, 16, H - 400);
+      g.restore();
+    }
+    stamps(W / 2, 60, H - 62, H - 30);
+    finePrint(60, W - 60, 18, 1);
+  } else if (kind === 'belt') {
+    // the shipping band around the rolled belt: scarlet, gold lettering
+    g.fillStyle = '#a01818';
+    g.fillRect(0, 0, W, H);
+    g.fillStyle = '#7c0f0f';
+    for (let y = 0; y < H; y += 64) g.fillRect(0, y, W, 8);
+    g.fillStyle = '#e8b84a';
+    g.font = 'bold 88px Georgia, serif';
+    g.textAlign = 'center';
+    for (const cy of [H * 0.3, H * 0.72]) {
+      title(W / 2, cy, 76, W - 60);
+    }
+    g.fillStyle = '#e8b84a';
+    g.font = 'bold 40px Georgia, serif';
+    g.fillText(`${t.crackers} CRACKERS`, W / 2, H * 0.5);
+    g.fillStyle = '#f4d890';
+    g.font = 'bold 24px Georgia, serif';
+    g.fillText(BRAND, W / 2, H * 0.5 + 44);
+    g.font = 'bold 21px Georgia, serif';
+    g.fillText(CAUTION, W / 2, H * 0.5 + 76);
+    g.font = '18px Georgia, serif';
+    g.fillText(lot, W / 2, H * 0.5 + 104);
+  } else if (kind === 'fountain') {
+    // cone: bloom rays pouring from the apex, band of type at the base
+    g.fillStyle = css(colA, 0.85);
+    g.fillRect(0, 0, W, 150);
+    g.strokeStyle = css(colB, 0.8);
+    g.lineWidth = 7;
+    for (let i = 0; i < 22; i++) { // the printed spray
+      const a = Math.PI * (0.15 + 0.7 * (i / 21));
+      g.beginPath();
+      g.moveTo(W / 2, 170);
+      g.quadraticCurveTo(
+        W / 2 + Math.cos(a) * 190, 320 - Math.sin(a) * 120,
+        W / 2 + Math.cos(a) * 260, 470 - Math.sin(a) * 40,
+      );
+      g.stroke();
+    }
+    starburst(W / 2, 200, 70, 4);
+    g.fillStyle = css(colA);
+    g.fillRect(0, 520, W, 130);
+    title(W / 2, 600, 52, W - 90);
+    stamps(W / 2, 700, 745, 782);
+    finePrint(60, W - 60, 830, 3);
+    g.fillStyle = css(colB, 0.75);
+    g.fillRect(0, H - 60, W, 22);
+  } else {
+    // rocket wrap (pinwheel drivers borrow it): bands, emblem, name — the
+    // fireworks-stand classic, repeated on both faces of the wrap
+    g.fillStyle = css(colA);
+    g.fillRect(0, 40, W, 190);
+    g.fillRect(0, H - 230, W, 190);
+    g.fillStyle = css(colA, 0.55);
+    for (const y of [40, 226, H - 230, H - 44]) g.fillRect(0, y, W, 10);
+    g.fillStyle = '#c9a544';
+    g.fillRect(0, 270, W, 10);
+    g.fillRect(0, H - 282, W, 10);
+    for (const cx of [W * 0.25, W * 0.75]) {
+      starburst(cx, 420, 92, 5);
+      title(cx, 590, 44, W * 0.44);
+      g.textAlign = 'center';
+      g.fillStyle = '#7a2f1a';
+      g.font = 'bold 22px Georgia, serif';
+      g.fillText(BRAND, cx, 680, W * 0.46);
+      g.fillStyle = '#4a3517';
+      g.font = 'bold 17px Georgia, serif';
+      g.fillText(CAUTION, cx, 712, W * 0.46);
+      g.font = '15px Georgia, serif';
+      g.fillStyle = 'rgba(60,45,25,0.8)';
+      g.fillText(lot, cx, 738, W * 0.46);
+    }
+    g.fillStyle = '#f4ecd8';
+    g.font = 'bold 30px Georgia, serif';
+    g.textAlign = 'center';
+    g.fillText('★ ★ ★', W * 0.25, 145);
+    g.fillText('★ ★ ★', W * 0.75, 145);
+    finePrint(40, W - 40, 780, 2);
   }
-  g.fillStyle = css(colA);
-  g.beginPath(); g.arc(cx, cy, 8, 0, Math.PI * 2); g.fill();
+  g.restore();
 
-  // fake fine print above/below the emblem
-  g.fillStyle = 'rgba(60,45,25,0.55)';
-  for (const y of [86, 94, H - 96, H - 88]) {
-    for (let x = 14; x < W - 14; x += 10) g.fillRect(x, y, 6 + (x * 7) % 4, 2);
-  }
-
-  // wear: scuffs and a couple of scratches
+  // wear: scuffs and a couple of scratches, deterministic per run
   g.fillStyle = 'rgba(30,20,10,0.30)';
-  for (let i = 0; i < 6; i++) g.fillRect(0, (i * 47 + 23) % H, W, 1);
+  for (let i = 0; i < 9; i++) g.fillRect(0, (rand() * H) | 0, W, 2);
   g.fillStyle = 'rgba(255,250,235,0.20)';
-  for (let i = 0; i < 4; i++) g.fillRect((i * 37 + 11) % W, 0, 1, H);
+  for (let i = 0; i < 6; i++) g.fillRect((rand() * W) | 0, 0, 2, H);
 
   const tex = new THREE.CanvasTexture(c);
   tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = 8; // the print stays legible at grazing wrap angles
   return tex;
+}
+
+// Shared paper-grain surface: one procedural normal map (machine-direction
+// kraft fibers) and one roughness mottle, tiled by every wrapper material —
+// tubes read as lacquered paper under the torch instead of smooth plastic.
+let _paperMaps = null;
+function paperMaps() {
+  if (_paperMaps) return _paperMaps;
+  const S = 256;
+  const rand = mulberry32(90210);
+  // height field: per-column fiber jitter + fine grain, box-blurred once
+  const h = new Float32Array(S * S);
+  const fiber = new Float32Array(S);
+  for (let x = 0; x < S; x++) fiber[x] = rand();
+  for (let y = 0; y < S; y++) {
+    for (let x = 0; x < S; x++) {
+      h[y * S + x] = fiber[x] * 0.55 + rand() * 0.45;
+    }
+  }
+  const blur = new Float32Array(S * S);
+  for (let y = 0; y < S; y++) {
+    for (let x = 0; x < S; x++) {
+      let s = 0;
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          s += h[((y + dy + S) % S) * S + ((x + dx + S) % S)];
+        }
+      }
+      blur[y * S + x] = s / 9;
+    }
+  }
+  const nc = document.createElement('canvas');
+  nc.width = nc.height = S;
+  const ng = nc.getContext('2d');
+  const nd = ng.createImageData(S, S);
+  const AMP = 2.2;
+  for (let y = 0; y < S; y++) {
+    for (let x = 0; x < S; x++) {
+      const dhx = (blur[y * S + ((x + 1) % S)] - blur[y * S + ((x - 1 + S) % S)]) * AMP;
+      const dhy = (blur[((y + 1) % S) * S + x] - blur[((y - 1 + S) % S) * S + x]) * AMP;
+      const il = 1 / Math.hypot(dhx, dhy, 1);
+      const o = (y * S + x) * 4;
+      nd.data[o] = (-dhx * il * 0.5 + 0.5) * 255;
+      nd.data[o + 1] = (-dhy * il * 0.5 + 0.5) * 255;
+      nd.data[o + 2] = il * 255;
+      nd.data[o + 3] = 255;
+    }
+  }
+  ng.putImageData(nd, 0, 0);
+  const normal = new THREE.CanvasTexture(nc);
+  normal.wrapS = normal.wrapT = THREE.RepeatWrapping;
+  normal.repeat.set(3, 6);
+
+  const rc = document.createElement('canvas');
+  rc.width = rc.height = S;
+  const rg = rc.getContext('2d');
+  const rd = rg.createImageData(S, S);
+  for (let i = 0; i < S * S; i++) {
+    // lacquer mottle: mostly glossy (~0.4) with matte scuffed patches
+    const v = (0.40 + (blur[i] - 0.5) * 0.3 + rand() * 0.1) * 255;
+    rd.data[i * 4] = rd.data[i * 4 + 1] = rd.data[i * 4 + 2] = v;
+    rd.data[i * 4 + 3] = 255;
+  }
+  rg.putImageData(rd, 0, 0);
+  const rough = new THREE.CanvasTexture(rc);
+  rough.wrapS = rough.wrapT = THREE.RepeatWrapping;
+  rough.repeat.set(3, 6);
+
+  _paperMaps = { normal, rough };
+  return _paperMaps;
+}
+
+// Soft round bead for fuse tips (shared by every item; sprites carry their
+// own materials for per-item opacity, but the texture is one canvas).
+let _fuseTipTex = null;
+function fuseTipTexture() {
+  if (_fuseTipTex) return _fuseTipTex;
+  const c = document.createElement('canvas');
+  c.width = c.height = 32;
+  const g = c.getContext('2d');
+  const grad = g.createRadialGradient(16, 16, 0, 16, 16, 16);
+  grad.addColorStop(0, 'rgba(255,255,255,1)');
+  grad.addColorStop(0.4, 'rgba(255,255,255,0.5)');
+  grad.addColorStop(1, 'rgba(255,255,255,0)');
+  g.fillStyle = grad;
+  g.fillRect(0, 0, 32, 32);
+  _fuseTipTex = new THREE.CanvasTexture(c);
+  return _fuseTipTex;
 }
 
 const GEO_CACHE = {};
@@ -402,19 +747,14 @@ function cachedGeo(key, make) {
 }
 
 // The restocker spawns items forever; per-item textures/materials would be an
-// unbounded GPU leak, so everything visual is cached per palette (8 entries).
+// unbounded GPU leak, so everything visual is cached — noses per palette
+// (12 entries), wrappers per (type, palette), generated lazily on the first
+// item of each combination.
 const MAT_CACHE = {};
 function paletteMats(palette) {
   let m = MAT_CACHE[palette.name];
   if (!m) {
     m = {
-      // glossy printed wrapper — the sheen is what reads "store-bought
-      // firework" instead of "painted cylinder"
-      label: new THREE.MeshStandardMaterial({
-        map: labelTexture(palette),
-        roughness: 0.38, metalness: 0, envMapIntensity: 0.7,
-        emissive: new THREE.Color(palette.a).multiplyScalar(0.14),
-      }),
       // metallic-paint nose cone: catches the moon and every burst
       nose: new THREE.MeshStandardMaterial({
         color: palette.b, roughness: 0.28, metalness: 0.6, envMapIntensity: 0.9,
@@ -424,10 +764,39 @@ function paletteMats(palette) {
   }
   return m;
 }
+
+const LABEL_CACHE = {};
+function labelMat(typeName, palette) {
+  const key = `${typeName}|${palette.name}`;
+  let m = LABEL_CACHE[key];
+  if (!m) {
+    const paper = paperMaps();
+    // lacquered printed wrapper — sheen + fiber grain is what reads
+    // "store-bought firework" instead of "painted cylinder"
+    m = new THREE.MeshStandardMaterial({
+      map: labelTexture(typeName, palette),
+      normalMap: paper.normal,
+      normalScale: new THREE.Vector2(0.4, 0.4),
+      roughnessMap: paper.rough,
+      roughness: 1.0, // the map carries the actual value
+      metalness: 0, envMapIntensity: 0.75,
+      emissive: new THREE.Color(palette.a).multiplyScalar(0.14),
+    });
+    LABEL_CACHE[key] = m;
+  }
+  return m;
+}
 const WOOD_ITEM_MAT = new THREE.MeshStandardMaterial({ color: 0x9c8a6a, roughness: 0.8 });
 const TUBE_MAT = new THREE.MeshStandardMaterial({ color: 0x443830, roughness: 0.85 });
 const CHAR_MAT = new THREE.MeshStandardMaterial({ color: 0x2c241c, roughness: 0.98 });
-const FUSE_MAT = new THREE.LineBasicMaterial({ color: 0x304028 });
+// physical odds and ends every stand-bought piece carries
+const CLAY_MAT = new THREE.MeshStandardMaterial({ color: 0xa06a48, roughness: 0.92 });
+const TAPE_MAT = new THREE.MeshStandardMaterial({ color: 0xc9b98e, roughness: 0.55, envMapIntensity: 0.6 });
+// visco fuse: green-braided cord, and the charred remnant behind the front.
+// The tip carries a faint pale emissive so an unlit fuse is findable by
+// moonlight (the glow sprite on top does the burning).
+const FUSE_MAT = new THREE.MeshStandardMaterial({ color: 0x46523a, roughness: 0.9 });
+const FUSE_CHAR_MAT = new THREE.MeshStandardMaterial({ color: 0x16120e, roughness: 1.0 });
 // glossy red cracker paper (per-instance color carries the shade variation);
 // the emissive floor keeps the roll readable scarlet in moonlight instead of
 // collapsing to black-on-black like pure diffuse red would
@@ -466,11 +835,15 @@ export class FireworkItem {
     const t = this.type;
     const root = this.root;
     const woodMat = WOOD_ITEM_MAT;
-    const labelMat = paletteMats(this.palette).label;
+    const wrapMat = labelMat(this.typeName, this.palette);
+    // per-instance identity: spin the wrap seam so two same-palette pieces
+    // from the crate never present byte-identical faces (free — shared
+    // geometry + material, only the mesh's rotation differs)
+    const seamSpin = Math.random() * Math.PI * 2;
 
     if (t.kind === 'rocket') {
       const stick = new THREE.Mesh(
-        cachedGeo(`stick`, () => new THREE.CylinderGeometry(0.004, 0.004, 1, 5)),
+        cachedGeo(`stick`, () => new THREE.CylinderGeometry(0.004, 0.004, 1, 8)),
         woodMat,
       );
       stick.scale.y = t.stickLen;
@@ -478,20 +851,50 @@ export class FireworkItem {
       root.add(stick);
 
       const body = new THREE.Mesh(
-        cachedGeo('body', () => new THREE.CylinderGeometry(1, 1, 1, 10)),
-        labelMat,
+        cachedGeo('body', () => new THREE.CylinderGeometry(1, 1, 1, 16)),
+        wrapMat,
       );
       body.scale.set(t.bodyR, t.bodyLen, t.bodyR);
       body.position.y = t.stickLen - t.bodyLen / 2;
+      body.rotation.y = seamSpin;
       root.add(body);
 
       const nose = new THREE.Mesh(
-        cachedGeo('nose', () => new THREE.ConeGeometry(1, 1, 10)),
+        cachedGeo('nose', () => new THREE.ConeGeometry(1, 1, 16)),
         paletteMats(this.palette).nose,
       );
       nose.scale.set(t.bodyR, t.bodyR * 2.4, t.bodyR);
       nose.position.y = t.stickLen + t.bodyR * 1.2;
       root.add(nose);
+
+      // seam line where the nose cap presses over the wrap
+      const seam = new THREE.Mesh(
+        cachedGeo('noseseam', () => new THREE.CylinderGeometry(1.015, 1.015, 1, 16, 1, true)),
+        CHAR_MAT,
+      );
+      seam.scale.set(t.bodyR, 0.004, t.bodyR);
+      seam.position.y = t.stickLen - 0.003;
+      root.add(seam);
+
+      // clay nozzle ring at the motor base — the bit that actually throats
+      // the burn on a real black-powder motor
+      const nozzle = new THREE.Mesh(
+        cachedGeo('claynozzle', () => new THREE.CylinderGeometry(0.86, 1.0, 1, 16, 1, true)),
+        CLAY_MAT,
+      );
+      nozzle.scale.set(t.bodyR * 0.98, t.bodyR * 0.55, t.bodyR * 0.98);
+      nozzle.position.y = t.stickLen - t.bodyLen - t.bodyR * 0.1;
+      root.add(nozzle);
+
+      // two tape wraps binding the guide stick to the tube
+      const tapeGeo = cachedGeo('tape', () => new THREE.CylinderGeometry(1.03, 1.03, 1, 16, 1, true));
+      for (const f of [0.16, 0.78]) {
+        const tape = new THREE.Mesh(tapeGeo, TAPE_MAT);
+        tape.scale.set(t.bodyR, 0.008, t.bodyR);
+        tape.position.y = t.stickLen - t.bodyLen + t.bodyLen * f;
+        tape.rotation.y = seamSpin * 1.7;
+        root.add(tape);
+      }
 
       this.grabY = t.stickLen - t.bodyLen / 2; // hold at the body
       this.grabTop = t.stickLen + t.bodyR * 2.4; // grabbable anywhere on the stick
@@ -499,12 +902,22 @@ export class FireworkItem {
       this.fuseTip = new THREE.Vector3(t.bodyR + 0.012, t.stickLen - t.bodyLen - 0.035, 0);
     } else if (t.kind === 'fountain') {
       const cone = new THREE.Mesh(
-        cachedGeo('fcone', () => new THREE.CylinderGeometry(0.35, 1, 1, 12)),
-        labelMat,
+        cachedGeo('fcone', () => new THREE.CylinderGeometry(0.35, 1, 1, 16)),
+        wrapMat,
       );
       cone.scale.set(t.baseR, t.height, t.baseR);
       cone.position.y = t.height / 2;
+      cone.rotation.y = seamSpin;
       root.add(cone);
+      this.coneMesh = cone; // burn-down shader hooks on while erupting
+      // wooden base plate so it sits on the sand like the store sold it
+      const plate = new THREE.Mesh(
+        cachedGeo('fplate', () => new THREE.CylinderGeometry(1, 1.06, 1, 16)),
+        woodMat,
+      );
+      plate.scale.set(t.baseR * 1.18, 0.012, t.baseR * 1.18);
+      plate.position.y = 0.006;
+      root.add(plate);
       this.grabY = t.height / 2;
       this.grabTop = t.height;
       this.fuseBase = new THREE.Vector3(0, t.height, 0);
@@ -514,7 +927,7 @@ export class FireworkItem {
       // a wheel of rocket drivers nailed to a stake: the stake runs up local
       // +Y, the wheel hangs just in front of it and spins around local Z
       const stake = new THREE.Mesh(
-        cachedGeo('pwstake', () => new THREE.CylinderGeometry(0.008, 0.011, 1, 6)),
+        cachedGeo('pwstake', () => new THREE.CylinderGeometry(0.008, 0.011, 1, 8)),
         woodMat,
       );
       stake.scale.y = t.stickLen;
@@ -542,7 +955,7 @@ export class FireworkItem {
 
       const rim = new THREE.Mesh(
         cachedGeo('pwrim', () => {
-          const g = new THREE.TorusGeometry(1, 0.055, 6, 22);
+          const g = new THREE.TorusGeometry(1, 0.055, 8, 28);
           g.rotateX(Math.PI / 2); // torus lies in X-Z so it spins around Y
           return g;
         }),
@@ -557,7 +970,7 @@ export class FireworkItem {
       const driverGeo = cachedGeo('pwdriver', () => new THREE.CylinderGeometry(0.014, 0.014, 0.09, 8));
       for (let i = 0; i < t.drivers; i++) {
         const a = (i / t.drivers) * Math.PI * 2;
-        const driver = new THREE.Mesh(driverGeo, labelMat);
+        const driver = new THREE.Mesh(driverGeo, wrapMat);
         driver.position.set(Math.cos(a) * t.wheelR, 0, Math.sin(a) * t.wheelR);
         driver.rotation.order = 'YXZ';
         driver.rotation.y = -a;      // face the tube along the tangent
@@ -576,12 +989,23 @@ export class FireworkItem {
       this.fuseTip = new THREE.Vector3(t.wheelR * 0.7 + 0.012, t.stickLen - t.wheelR * 0.7 - 0.045, 0.055);
     } else if (t.kind === 'candle') {
       const tube = new THREE.Mesh(
-        cachedGeo('ctube', () => new THREE.CylinderGeometry(1, 1, 1, 10)),
-        labelMat,
+        cachedGeo('ctube', () => new THREE.CylinderGeometry(1, 1, 1, 16)),
+        wrapMat,
       );
       tube.scale.set(t.bodyR, t.bodyLen, t.bodyR);
       tube.position.y = t.bodyLen / 2;
+      tube.rotation.y = seamSpin;
       root.add(tube);
+      // char band: a sleeve that creeps down the tube one shot at a time
+      // (scaled to zero until the first shot chars it)
+      const sleeve = new THREE.Mesh(
+        cachedGeo('charsleeve', () => new THREE.CylinderGeometry(1.025, 1.025, 1, 16, 1, true)),
+        CHAR_MAT,
+      );
+      sleeve.scale.set(t.bodyR, 0.0001, t.bodyR);
+      sleeve.position.y = t.bodyLen;
+      root.add(sleeve);
+      this.charSleeve = sleeve;
       this.grabY = t.bodyLen * 0.4;
       this.grabTop = t.bodyLen;
       this.fuseBase = new THREE.Vector3(0, t.bodyLen, 0);
@@ -639,6 +1063,18 @@ export class FireworkItem {
         cordGeo.dispose();
       };
 
+      // shipping band around the flat roll — rips away the moment the coil
+      // unfreezes (grabbed or lit), like the paper it is
+      const band = new THREE.Mesh(
+        cachedGeo('beltband', () => new THREE.CylinderGeometry(1, 1, 1, 16, 1, true)),
+        wrapMat,
+      );
+      band.scale.set(0.081, 0.034, 0.081);
+      band.position.y = 0.024;
+      band.rotation.y = seamSpin;
+      root.add(band);
+      this.beltBand = band;
+
       this.grabY = 0.02; // reach is per-rope-point — see grabDistance in input.js
       this.fuseBase = new THREE.Vector3();       // both repositioned every
       this.fuseTip = new THREE.Vector3(0, -0.045, 0); // frame to the strand's far end
@@ -646,18 +1082,22 @@ export class FireworkItem {
     } else if (t.kind === 'cake') {
       const box = new THREE.Mesh(
         cachedGeo('cakebox', () => new THREE.BoxGeometry(1, 1, 1)),
-        labelMat,
+        wrapMat,
       );
       box.scale.set(t.boxW, t.boxH, t.boxW);
       box.position.y = t.boxH / 2;
       root.add(box);
       const tubeGeo = cachedGeo('caketube', () => new THREE.CylinderGeometry(0.016, 0.016, 0.05, 8));
       const tubeMat = TUBE_MAT;
+      // keep the meshes indexed: _cakeShot fires from these REAL tubes in a
+      // scrambled-but-fixed order and chars each rim as it goes
+      this.cakeTubes = [];
       for (let ix = -1; ix <= 1; ix++) {
         for (let iz = -1; iz <= 1; iz++) {
           const tube = new THREE.Mesh(tubeGeo, tubeMat);
           tube.position.set(ix * 0.055, t.boxH + 0.02, iz * 0.055);
           root.add(tube);
+          this.cakeTubes.push(tube);
         }
       }
       this.grabY = t.boxH / 2;
@@ -667,18 +1107,87 @@ export class FireworkItem {
       this.nozzleY = t.boxH + 0.045;
     }
 
-    // items throw moon shadows like everything else on the sand
-    root.traverse((o) => { if (o.isMesh) o.castShadow = true; });
+    // items throw moon shadows like everything else on the sand — and catch
+    // each other's (a rocket shades the crate straw it leans on)
+    root.traverse((o) => {
+      if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; }
+    });
 
-    // the fuse cord
-    const fuseGeo = new THREE.BufferGeometry().setFromPoints([this.fuseBase, this.fuseTip]);
-    this.fuseLine = new THREE.Line(fuseGeo, FUSE_MAT);
-    root.add(this.fuseLine);
+    // the fuse cord: a real braided tube (1-px lines vanish at fuse-lighting
+    // distance, which is exactly where you stare at it). Two pieces sharing
+    // cached unit geometry: live cord base->burn front, charred remnant
+    // burn front->tip. Both are restretched every frame by _updateFuse.
+    this.fuseLive = new THREE.Mesh(
+      cachedGeo('fusetube', () => new THREE.TubeGeometry(
+        new THREE.CatmullRomCurve3([
+          new THREE.Vector3(0, 0, 0), new THREE.Vector3(0.004, 0.33, 0.002),
+          new THREE.Vector3(0.005, 0.66, -0.002), new THREE.Vector3(0, 1, 0),
+        ]), 7, 0.0016, 6, false)),
+      FUSE_MAT,
+    );
+    this.fuseChar = new THREE.Mesh(
+      cachedGeo('fusechartube', () => new THREE.TubeGeometry(
+        new THREE.CatmullRomCurve3([
+          new THREE.Vector3(0, 0, 0), new THREE.Vector3(0.006, 0.4, 0.003),
+          new THREE.Vector3(0.002, 0.75, -0.004), new THREE.Vector3(-0.004, 1, 0),
+        ]), 7, 0.001, 6, false)),
+      FUSE_CHAR_MAT,
+    );
+    this.fuseLive.castShadow = false;
+    this.fuseChar.castShadow = false;
+    root.add(this.fuseLive, this.fuseChar);
 
     // where fuse sparks live (moves toward fuseBase as it burns)
     this.fuseAnchor = new THREE.Object3D();
     this.fuseAnchor.position.copy(this.fuseTip);
     root.add(this.fuseAnchor);
+
+    // the tip bead: pale so an unlit fuse is findable by moonlight, blooming
+    // hot while burning, and warming under a hovering torch flame (fuseGlow)
+    this.fuseTipSprite = new THREE.Sprite(new THREE.SpriteMaterial({
+      map: fuseTipTexture(), transparent: true, opacity: 0.14, depthWrite: false,
+      blending: THREE.AdditiveBlending, color: 0xd8d2b8, fog: false,
+    }));
+    this.fuseTipSprite.scale.setScalar(0.014);
+    this.fuseAnchor.add(this.fuseTipSprite);
+    this._updateFuse();
+  }
+
+  // Stretch the live/char fuse tubes between base, burn front and tip, and
+  // run the tip bead's glow state. Pure local-space math, no allocations.
+  _updateFuse() {
+    const anchor = this.fuseAnchor.position;
+    const hidden = !!this.beltPts && (this.state === 'active' || this.state === 'spent');
+    const seg = (mesh, from, to) => {
+      _fv1.subVectors(to, from);
+      const len = _fv1.length();
+      if (len < 0.004) { mesh.visible = false; return; }
+      mesh.visible = !hidden;
+      mesh.position.copy(from);
+      mesh.quaternion.setFromUnitVectors(UP, _fv1.multiplyScalar(1 / len));
+      mesh.scale.y = len;
+    };
+    seg(this.fuseLive, this.fuseBase, anchor);
+    seg(this.fuseChar, anchor, this.fuseTip);
+    const tip = this.fuseTipSprite;
+    if (hidden) { tip.visible = false; return; }
+    tip.visible = true;
+    const glow = clamp(this.fuseGlow ?? 0, 0, 1);
+    if (this.fuseRemaining > 0) {
+      // burning: hot orange bead, sputter-flickering
+      tip.material.color.setHex(0xffb050);
+      tip.material.opacity = 0.75 + Math.random() * 0.25;
+      tip.scale.setScalar(0.022 + Math.random() * 0.012);
+    } else if (glow > 0.01) {
+      // torch hovering: the 'almost lit' warm-up must be visible
+      tip.material.color.setHex(0xffc878);
+      tip.material.opacity = 0.14 + glow * 0.7;
+      tip.scale.setScalar(0.014 + glow * 0.012);
+    } else {
+      tip.material.color.setHex(0xd8d2b8);
+      tip.material.opacity = 0.14;
+      tip.scale.setScalar(0.014);
+    }
   }
 
   fuseWorldPos(out = new THREE.Vector3()) {
@@ -818,11 +1327,8 @@ export class FireworkItem {
     this.root.worldToLocal(_bp);
     this.fuseTip.copy(_bp);
     if (!this.isLit) this.fuseAnchor.position.copy(this.fuseTip);
-    const fp = this.fuseLine.geometry.attributes.position;
-    fp.setXYZ(0, this.fuseBase.x, this.fuseBase.y, this.fuseBase.z);
-    fp.setXYZ(1, this.fuseAnchor.position.x, this.fuseAnchor.position.y, this.fuseAnchor.position.z);
-    fp.needsUpdate = true;
-    this.fuseLine.visible = this.state !== 'active' && this.state !== 'spent';
+    // the shipping band exists only while the roll is still a roll
+    if (this.beltBand) this.beltBand.visible = this.beltFrozen;
 
     // stamp the crackers along the strand, herringbone-braided in pairs
     const mesh = this.crackerMesh;
@@ -874,6 +1380,8 @@ export class FireworkItem {
     this.sounds.fuse = sys.audio.play('fuse', this.fuseWorldPos(_v1), {
       gain: 0.8, loop: true, refDistance: 0.6, send: 0.1, hrtf: true,
     });
+    // a burning fuse really lights the tube and the hand around it
+    sys.fuseLights?.acquire(this);
     return true;
   }
 

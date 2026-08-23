@@ -13,12 +13,14 @@ export function terrainHeight(x, z) {
   const dunes = fbm2(x * 0.006, z * 0.011, 4) * 9.0;
   const swell = valueNoise2(x * 0.0016 + 3.7, z * 0.0016 - 1.2) * 14.0;
   const ripple = valueNoise2(x * 0.35, z * 0.09) * 0.05;
-  let h = dunes + swell + ripple;
 
-  // Flatten the campsite: full flatness within ~9 m of origin, blending out to 40 m.
+  // Flatten the campsite: the big forms go to zero within ~9 m of origin
+  // (blending out to 40 m), but a residual of the centimetre ripple survives
+  // everywhere — a perfectly planar camp reads as a billiard table underfoot.
+  // Beyond 40 m this is exactly dunes + swell + ripple, same as ever.
   const d = Math.hypot(x, z);
   const flat = smoothstep(9, 40, d);
-  return h * flat;
+  return (dunes + swell) * flat + ripple * (0.3 + 0.7 * flat);
 }
 
 export function terrainNormal(x, z, out = new THREE.Vector3()) {
@@ -128,6 +130,25 @@ function injectGlitter(shader) {
       '#include <fog_vertex>\nvWPos = (modelMatrix * vec4(transformed, 1.0)).xyz;');
   shader.fragmentShader = shader.fragmentShader
     .replace('#include <common>', '#include <common>\nvarying vec3 vWPos;')
+    .replace('#include <normal_fragment_maps>', /* glsl */`#include <normal_fragment_maps>
+      {
+        // near-field detail relief: a second, finer ripple set (~0.8 m
+        // tiling) perturbs the normal analytically, fading out by ~8.5 m so
+        // sand has grain where your feet are without moiréing the distance
+        float dnDist = length(cameraPosition - vWPos);
+        float dnFade = 1.0 - smoothstep(4.5, 8.5, dnDist);
+        if (dnFade > 0.001) {
+          vec2 dp = vWPos.xz * 7.85;
+          float wa = dp.x + 1.3 * sin(dp.y * 0.61);
+          float wb = dot(dp, vec2(0.42, 1.13)) + 1.7;
+          float ca = cos(wa), cb = cos(wb);
+          // exact gradient of h = 0.6 sin(wa) + 0.4 sin(wb)
+          vec2 dnGrad = vec2(0.6 * ca + 0.168 * cb,
+                             0.476 * ca * cos(dp.y * 0.61) + 0.452 * cb);
+          vec3 dnW = vec3(-dnGrad.x, 0.0, -dnGrad.y) * (0.22 * dnFade);
+          normal = normalize(normal + mat3(viewMatrix) * dnW);
+        }
+      }`)
     .replace('#include <opaque_fragment>', /* glsl */`
       {
         vec3 gDir = normalize(cameraPosition - vWPos);
@@ -170,7 +191,7 @@ export function createTerrain() {
   const mat = new THREE.MeshStandardMaterial({
     map: makeSandTexture(),
     normalMap: makeSandNormalMap(),
-    normalScale: new THREE.Vector2(0.4, 0.4),
+    normalScale: new THREE.Vector2(0.55, 0.55),
     vertexColors: true,
     roughness: 0.93,
     metalness: 0,

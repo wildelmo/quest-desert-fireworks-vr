@@ -45,8 +45,10 @@ const R2L = [8, 7, 6, 5, 4, 3, 2, 1, 0];
 const OUTSIDE_IN = [0, 8, 1, 7, 2, 6, 3, 5, 4];
 const LOW = [9, 10, 11, 12, 13];
 
-// one-shot sample plays allowed per second, sustained (lifts + reports);
-// brief peaks above this are reserved for the salute chains and the wall
+// one-shot VOICES allowed per second, sustained (lifts + reports + the
+// crackle/sizzle tails boom() tows behind crackle patterns and big
+// reports); brief peaks above this are reserved for the salute chains
+// and the wall
 const SOUND_CAP = 15;
 const SOUND_RANK = { big: 3, med: 2, small: 1 };
 
@@ -191,18 +193,24 @@ export class FinaleShow {
   }
 
   /** VOLLEY — the atomic unit: N effects on one cue, staggered a few
-   *  frames so the cluster blooms as one gesture. Two audible lifts max. */
+   *  frames so the cluster blooms as one gesture. Two audible lifts max.
+   *  ONE ballistic draw per volley: per-pad speed/flight draws scattered
+   *  the break order and smeared the chord into an arpeggio. Pads keep
+   *  the launch stagger; jitter is bounded to a fraction of ONE step so
+   *  wide staggers can't invert pad order. */
   _volley(t, padIdxs, pattern, size, o = {}, stagger = 0.06) {
     const lifts = o.lifts ?? 2;
     const L = LAYERS[o.layer ?? 'mid'];
+    const speed = o.speed ?? randRange(L.speed[0], L.speed[1]);
+    const flightT = o.flightT ?? randRange(L.flightT[0], L.flightT[1]);
     padIdxs.forEach((p, k) => {
-      this._cue(t + k * stagger * randRange(0.75, 1.25), p, pattern, size * randRange(0.85, 1.15), {
+      this._cue(t + k * stagger + randRange(-0.25, 0.25) * stagger, p, pattern, size * randRange(0.85, 1.15), {
         ...o,
         lift: k < lifts,
         sound: o.sound !== undefined ? o.sound
           : (size > 0.75 ? 'big' : size > 0.45 ? 'med' : 'small'),
-        speed: o.speed ?? randRange(L.speed[0], L.speed[1]),
-        flightT: o.flightT ?? randRange(L.flightT[0], L.flightT[1]),
+        speed,
+        flightT: flightT + randRange(-0.03, 0.03),
       });
     });
     return padIdxs.length;
@@ -214,16 +222,22 @@ export class FinaleShow {
   }
 
   /** CHASE — running fire across the arc at a fixed 60-120 ms offset;
-   *  the wave crosses the front in ~0.6-1.1 s. HK's galloping horses. */
+   *  the wave crosses the front in ~0.6-1.1 s. HK's galloping horses.
+   *  One ballistic draw for the whole line: with a shared flightT the
+   *  BREAKS sweep in pad order at the launch gap — per-pad flight draws
+   *  were shuffling the very ripple the chase exists for. Jitter stays
+   *  under half a step, so the sweep is monotonic by construction. */
   _chase(t0, gap, order, pattern, size, o = {}) {
     const L = LAYERS[o.layer ?? 'mid'];
+    const speed = o.speed ?? randRange(L.speed[0], L.speed[1]);
+    const flightT = o.flightT ?? randRange(L.flightT[0], L.flightT[1]);
     order.forEach((p, k) => {
       this._cue(t0 + k * gap, p, pattern, size * randRange(0.9, 1.1), {
         ...o,
         lift: k === 0 || k === order.length - 1,
         sound: o.sound ?? 'small',
-        speed: o.speed ?? randRange(L.speed[0], L.speed[1]),
-        flightT: o.flightT ?? randRange(L.flightT[0], L.flightT[1]),
+        speed,
+        flightT: flightT + randRange(-0.45, 0.45) * Math.min(gap, 0.07),
       });
     });
     return order.length;
@@ -277,12 +291,17 @@ export class FinaleShow {
         speed, flightT, spread: 0.03,
       });
     });
-    // the frying-metal hush arrives WITH the break, not the launch
+    // the frying-metal hush arrives WITH the break, not the launch. The
+    // ~58 m sheet is not a point source: three decorrelated sizzle voices
+    // (shuffle-bag variants + rate detune) spread across the pad span,
+    // per-voice gain 1.1/sqrt(3) so total energy matches the old single.
     this.events.push({
       t, fn: () => {
-        const mid = this.pads[padIndices[(padIndices.length / 2) | 0]];
-        const pos = new THREE.Vector3(mid.x, height * 0.6, mid.z);
-        this.curtains.push({ pos, delay: flightT, t: 0, dur: 9, sink: 3.5, handle: null });
+        const a = this.pads[padIndices[0]];
+        const b = this.pads[padIndices[padIndices.length - 1]];
+        const poss = [0.12, 0.5, 0.88].map((u) => new THREE.Vector3(
+          a.x + (b.x - a.x) * u, height * 0.6, a.z + (b.z - a.z) * u));
+        this.curtains.push({ poss, delay: flightT, t: 0, dur: 9, sink: 3.5, handles: null, gain: 0.64 });
       },
     });
   }
@@ -362,6 +381,12 @@ export class FinaleShow {
    * of the locked samples, never from clipping the audio graph.
    */
   _applySoundBudget() {
+    // a cue's TRUE voice cost: the engine's boom() tows a crackle tail
+    // (+1 voice) behind crackle/multibreak breaks and a sizzle (+1) behind
+    // every 'big' report (soundSize 1 > 0.7 downstream) — a budget that
+    // counts those as one play is lying about the second of the break
+    const voices = (c) => (!c.sound ? 0
+      : (c.sound === 'big' || c.pattern === 'crackle' || c.pattern === 'multibreak') ? 2 : 1);
     const buckets = new Map();
     const get = (s) => {
       let b = buckets.get(s);
@@ -374,10 +399,10 @@ export class FinaleShow {
     }
     let demoted = 0;
     for (const [, b] of buckets) {
-      // count-reducing demotion of the overflow
-      let total = b.lifts + b.booms.length;
+      // count-reducing demotion of the overflow (voice-weighted)
+      const total = () => b.lifts + b.booms.reduce((n, c) => n + voices(c), 0);
       let guard = 200;
-      while (total > SOUND_CAP && guard-- > 0) {
+      while (total() > SOUND_CAP && guard-- > 0) {
         let pick = null;
         for (const c of b.booms) {
           if (c.anchor || c.exempt || !c.sound) continue;
@@ -385,7 +410,7 @@ export class FinaleShow {
             || (SOUND_RANK[c.sound] === SOUND_RANK[pick.sound] && c.size < pick.size)) pick = c;
         }
         if (!pick) break; // only anchors/salutes left — sanctioned peak
-        if (pick.sound === 'small') { pick.sound = null; total--; }
+        if (pick.sound === 'small') pick.sound = null;
         else pick.sound = pick.sound === 'big' ? 'med' : 'small';
         demoted++;
       }
@@ -399,10 +424,11 @@ export class FinaleShow {
         demoted++;
       }
     }
-    // report the post-demotion profile for the QA harness
+    // report the post-demotion profile for the QA harness — voice-weighted,
+    // so the number states what the engine will actually spawn
     let maxPlays = 0;
     for (const [, b] of buckets) {
-      maxPlays = Math.max(maxPlays, b.lifts + b.booms.filter((c) => c.sound).length);
+      maxPlays = Math.max(maxPlays, b.lifts + b.booms.reduce((n, c) => n + voices(c), 0));
     }
     this.soundBudget = { cap: SOUND_CAP, demoted, maxPlaysPerSec: maxPlays };
   }
@@ -493,27 +519,40 @@ export class FinaleShow {
       const ROT_A = [CRIMSON, PAL('oasis teal'), SCARLET, PAL('blue gold')];
       const ROT_B = [PAL('strontium red'), PAL('copper blue'), PAL('golden brocade'), PAL('teal ember')];
       const hitTimes = [T(22.8), T(37.4)]; // the all-pad hits ARE those bars
+      // PHRASING, not a metronome: two written-in rests (hold the breath,
+      // then speak again — the first lands right before hit 1, so the hit
+      // arrives out of silence), a lyrical window where ONE big shell owns
+      // the sky, and a four-bar double-time sprint around T(32) before the
+      // second rest. Scene length and the anchor cadence are untouched.
+      const rests = [T(20.9), T(34.0)];
+      let restI = 0;
+      const LYRIC = [T(23.9), T(27.1)]; // held for the lone scarlet peony
       let bar = T(15.6), k = 0;
       while (bar < T(43.5)) {
         // a bar that would collide with an all-pad hit steps past it — the
         // hit takes that beat, the pulse never stops
         const hit = hitTimes.find((h) => Math.abs(bar - h) < 1.15);
         if (hit) bar = hit + randRange(1.2, 1.5);
+        if (bar >= LYRIC[0] && bar < LYRIC[1]) bar = LYRIC[1] + randRange(0, 0.2);
         const pal = (bar < T(30) ? ROT_A : ROT_B)[k % 4];
         const statement = k % 4 === 0; // the red bar: bigger, slower, mid band
+        const sprint = bar >= T(30.4) && bar < T(33.9); // the double-time bars
         // odd bars borrow a pontoon pad: same volley, one break nearer the
         // camp — cheap depth the real barges get for free
         const group = k % 2 ? [...ODDS, 9 + (k % 5)] : EVENS;
         const fam = k % 5; // rotate shell families bar to bar (5 vs 4-color
         // rotation is coprime, so family x color combinations keep walking)
+        // per-bar stagger phrasing: statements roll; answers land as a
+        // tight hit, a normal cluster or a lazy smear — never one width
+        const stag = statement ? 0.07 : sprint ? 0.03 : [0.014, 0.05, 0.12][k % 3];
         this._volley(bar, group,
           fam === 1 ? 'ghost' : fam === 2 ? 'crossette' : fam === 3 ? 'serpents' : fam === 4 ? 'dragoneggs' : 'peony',
-          statement ? randRange(0.62, 0.72) : randRange(0.42, 0.52), {
+          statement && !sprint ? randRange(0.62, 0.72) : randRange(0.42, 0.52), {
             palette: pal, layer: statement ? 'mid' : k % 3 === 2 ? 'low' : 'mid',
-            sound: statement ? 'med' : 'small',
+            sound: statement && !sprint ? 'med' : 'small',
             pistil: fam === 0 ? { color: pal.b, ratio: 0.38 } : undefined,
-          }, statement ? 0.07 : 0.045);
-        if (k % 2 === 0) {
+          }, stag);
+        if (k % 2 === 0 && !sprint) {
           // the woven crisscross: adjacent pontoon pads lean opposite ways;
           // gold under the statements, the bar's color under the answers
           const lowPad = 9 + ((k / 2) | 0) % 5;
@@ -522,8 +561,18 @@ export class FinaleShow {
         }
         if (k % 5 === 3) this._mineFront(bar + 0.5, [9 + (k % 5)], { palette: pal, size: 0.8, lifts: 1 });
         k++;
-        bar += randRange(1.45, 1.75); // on the beat, never on a grid
+        bar += sprint ? randRange(0.72, 0.88) : randRange(1.45, 1.75); // on the beat, never on a grid
+        if (restI < rests.length && bar >= rests[restI]) {
+          bar += randRange(1.2, 1.5); // the rest: a real hole in the pulse
+          restI++;
+        }
       }
+      // the lyrical bar: one big scarlet peony fired into the held gap —
+      // the only break in its ±1.2 s window, the tide taking one breath
+      this._cue(T(25.0), 4, 'peony', 1.3, {
+        palette: SCARLET, sound: 'big', anchor: true, lift: true,
+        speed: 58, flightT: 3.3, pistil: { color: SCARLET.b, ratio: 0.35 },
+      });
       // sparse anchors: big ray shells with tremalon rise, one at a time —
       // the middle two are COLD against the warm field (contrast, the
       // thing that keeps a 30 s scene from reading as one red block)
@@ -731,6 +780,9 @@ export class FinaleShow {
       // SILENCE (126.8-131.7): nothing. The last break fades ~129.3 and
       // the desert gets 2.5 s of real dark — the wall lands because of it.
       // (The 14 lift thumps at 131.7 firing in the dark are the tease.)
+      // The ambience beds duck ~5 dB under the wall and the salutes — the
+      // gold roar owns the noise floor, the wind comes back with the dark.
+      at(T(131.5), () => this.audio.duckAmbience?.(20));
       this._wall(T(131.7));
       // Stage 3 (144-148): the terminal salvo — three giant crowns to max
       // altitude, then thirty salutes rippling L→R→L→outside-in across
@@ -754,19 +806,25 @@ export class FinaleShow {
         // reports alternate big/med: at 0.12 s spacing the ear hears one
         // accelerating thunder roll either way, but half the pileup — 30
         // simultaneous big-class voices (each towing a crackle tail) were
-        // overloading the audio thread into dropouts on Quest
+        // overloading the audio thread into dropouts on Quest. The final
+        // two step down to med so the crescendo HANDS OFF to the triple
+        // instead of stepping on it.
         this._cue(t3 + 0.35 + k * 0.12, p, 'salute', 0.55 + 0.3 * (k / ripple.length), {
-          palette: PAL('silver'), sound: k % 2 ? 'med' : 'big', lift: k % 3 === 0,
+          palette: PAL('silver'),
+          sound: k >= ripple.length - 2 ? 'med' : k % 2 ? 'med' : 'big',
+          lift: k % 3 === 0,
           speed: randRange(41, 46), flightT: randRange(2.0, 2.3),
         });
       });
-      // the last word: a tight center triple, biggest reports of the night
+      // the last word: a tight center triple, biggest reports of the night,
+      // held until ~1.1 s AFTER the ripple's last report has rolled off —
+      // fired inside the tail it was three more raindrops, not a last word
       [3, 5, 4].forEach((p, k) => {
-        this._cue(t3 + 3.75 + k * 0.15, p, 'salute', 0.95, {
+        this._cue(t3 + 4.9 + k * 0.22, p, 'salute', 0.95, {
           palette: PAL('silver'), sound: 'big', lift: true, speed: 45, flightT: 2.3,
         });
       });
-      // HARD CUT: last launch ≈ 148.1, last report ≈ 150.4 — then nothing
+      // HARD CUT: last launch ≈ 149.3, last report ≈ 151.6 — then nothing
       // but glitter fallout and the echo rolling off the dunes. Black.
     }
 
@@ -776,7 +834,12 @@ export class FinaleShow {
     this.cues = this._cues;
     for (const c of this._cues) at(c.t, () => this._fire(c));
     this.events.sort((a, b) => a.t - b.t);
-    this.duration = 157; // last break + crown fallout, then the desert gets quiet
+    // duration follows the program — last scheduled report plus fallout,
+    // then the desert gets quiet. Derived, so a re-cut of the finale can
+    // never silently truncate the show again.
+    let lastBurst = 0;
+    for (const c of this._cues) lastBurst = Math.max(lastBurst, c.tBurst ?? c.t);
+    this.duration = lastBurst + 4.0;
     return true;
   }
 
@@ -813,35 +876,40 @@ export class FinaleShow {
     }
 
     // waterfall sizzle loops: wait out the shells' flight, then ride the
-    // sheet down and fade with it
+    // sheet down and fade with it — three voices per curtain, one span
     for (let i = this.curtains.length - 1; i >= 0; i--) {
       const c = this.curtains[i];
       if (c.delay > 0) {
         c.delay -= dt;
         if (c.delay > 0) continue;
-        const dist = this.audio.listenerPos.distanceTo(c.pos);
-        c.handle = this.audio.play('waterfall', c.pos, {
-          gain: 0.001, loop: true, refDistance: 30, send: 0.5,
-          lowpass: Math.max(1400, 9000 - dist * 55),
-          rate: randRange(0.92, 1.02),
-        });
-        if (!c.handle) { this.curtains.splice(i, 1); continue; }
-        c.handle.setGain(1.1);
+        c.handles = c.poss.map((p) => {
+          const dist = this.audio.listenerPos.distanceTo(p);
+          return this.audio.play('waterfall', p, {
+            gain: 0.001, loop: true, refDistance: 30, send: 0.5,
+            lowpass: Math.max(1400, 9000 - dist * 55),
+            rate: randRange(0.90, 1.04),
+          });
+        }).filter(Boolean);
+        if (!c.handles.length) { this.curtains.splice(i, 1); continue; }
+        for (const h of c.handles) h.setGain(c.gain);
       }
       c.t += dt;
-      c.pos.y -= c.sink * dt;
-      c.handle.setPosition(c.pos);
+      for (let j = 0; j < c.poss.length; j++) {
+        c.poss[j].y -= c.sink * dt;
+        c.handles[j]?.setPosition(c.poss[j]);
+      }
       if (c.t > c.dur) {
-        c.handle.stop(1.2);
+        for (const h of c.handles) h.stop(1.2);
         this.curtains.splice(i, 1);
       } else if (c.dur - c.t < 2.5) {
-        c.handle.setGain(1.1 * (c.dur - c.t) / 2.5);
+        const g = c.gain * (c.dur - c.t) / 2.5;
+        for (const h of c.handles) h.setGain(g);
       }
     }
 
     if (this._ei >= this.events.length && this.time >= this.duration) {
       this.running = false;
-      for (const c of this.curtains) c.handle?.stop(0.5);
+      for (const c of this.curtains) for (const h of c.handles ?? []) h.stop(0.5);
       this.curtains.length = 0;
       this.onEnd?.();
     }
