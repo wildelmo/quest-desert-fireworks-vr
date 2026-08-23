@@ -726,6 +726,82 @@ function paperMaps() {
   return _paperMaps;
 }
 
+// Parachute canopy for illumination flares: a shallow dome as two crossed
+// bowed quads (alpha-tested panel texture) + four shroud lines down to the
+// candle. Geometry and texture built once; each flare gets its own tinted
+// material (disposed with the flare) and rides the emitter's sway path.
+let _canopyGeo = null;
+let _canopyTex = null;
+let _shroudGeo = null;
+const SHROUD_MAT = new THREE.LineBasicMaterial({ color: 0x3a3a40, fog: false });
+function makeFlareCanopy(col) {
+  if (!_canopyGeo) {
+    const quad = new THREE.PlaneGeometry(0.62, 0.30, 6, 1);
+    const p = quad.attributes.position;
+    for (let i = 0; i < p.count; i++) {
+      const x = p.getX(i);
+      p.setZ(i, -x * x * 1.1); // bow the panel into a shallow dome section
+    }
+    quad.rotateX(-Math.PI / 2);
+    const quad2 = quad.clone().rotateY(Math.PI / 2);
+    // merge by hand: two quads, one geometry (positions + uv only)
+    const g = new THREE.BufferGeometry();
+    const pa = quad.attributes, pb = quad2.attributes;
+    const join = (name, itemSize) => {
+      const a = pa[name].array, b = pb[name].array;
+      const out = new Float32Array(a.length + b.length);
+      out.set(a); out.set(b, a.length);
+      g.setAttribute(name, new THREE.BufferAttribute(out, itemSize));
+    };
+    join('position', 3);
+    join('uv', 2);
+    const ia = quad.index.array, ib = quad2.index.array;
+    const idx = new Uint16Array(ia.length + ib.length);
+    idx.set(ia);
+    const off = pa.position.count;
+    for (let i = 0; i < ib.length; i++) idx[ia.length + i] = ib[i] + off;
+    g.setIndex(new THREE.BufferAttribute(idx, 1));
+    _canopyGeo = g;
+
+    const c = document.createElement('canvas');
+    c.width = 64; c.height = 32;
+    const gg = c.getContext('2d');
+    gg.clearRect(0, 0, 64, 32);
+    gg.fillStyle = '#e8e2d0';
+    gg.beginPath(); // the scalloped arc silhouette of a small chute panel
+    gg.moveTo(2, 30);
+    gg.quadraticCurveTo(32, -14, 62, 30);
+    gg.quadraticCurveTo(47, 24, 32, 29);
+    gg.quadraticCurveTo(17, 24, 2, 30);
+    gg.closePath(); gg.fill();
+    gg.strokeStyle = 'rgba(90,80,60,0.8)'; // panel seams
+    gg.lineWidth = 1.5;
+    for (const x of [17, 32, 47]) {
+      gg.beginPath(); gg.moveTo(x, 30); gg.quadraticCurveTo(x, 8, 32, 2); gg.stroke();
+    }
+    _canopyTex = new THREE.CanvasTexture(c);
+    _canopyTex.colorSpace = THREE.SRGBColorSpace;
+
+    const pts = [];
+    for (const [sx, sz] of [[0.26, 0], [-0.26, 0], [0, 0.26], [0, -0.26]]) {
+      pts.push(sx, 0.5, sz, 0, -0.06, 0); // rim down to the candle head
+    }
+    _shroudGeo = new THREE.BufferGeometry();
+    _shroudGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(pts), 3));
+  }
+  const group = new THREE.Group();
+  const mat = new THREE.MeshBasicMaterial({
+    map: _canopyTex, alphaTest: 0.4, side: THREE.DoubleSide, fog: false,
+    color: new THREE.Color(0.55 + col[0] * 0.4, 0.55 + col[1] * 0.4, 0.55 + col[2] * 0.4),
+  });
+  const dome = new THREE.Mesh(_canopyGeo, mat);
+  dome.position.y = 0.5;
+  group.add(dome);
+  group.add(new THREE.LineSegments(_shroudGeo, SHROUD_MAT));
+  group.userData.mat = mat; // per-flare tint — dispose with the flare
+  return group;
+}
+
 // Soft round bead for fuse tips (shared by every item; sprites carry their
 // own materials for per-item opacity, but the texture is one canvas).
 let _fuseTipTex = null;
@@ -769,11 +845,27 @@ function paletteMats(palette) {
   return m;
 }
 
-const LABEL_CACHE = {};
+// Wrapper cache, bounded: 9 types x 12 palettes could otherwise pin ~100
+// 512x1024 canvases in VRAM over a long night. Entries carry a refcount
+// (_buildMesh acquires, removeItem releases); past the cap, the oldest
+// unreferenced wrapper is disposed and will simply regenerate if that
+// combination ever comes off the press again.
+const LABEL_CACHE = new Map();
+const LABEL_CACHE_MAX = 36;
 function labelMat(typeName, palette) {
   const key = `${typeName}|${palette.name}`;
-  let m = LABEL_CACHE[key];
+  let m = LABEL_CACHE.get(key);
   if (!m) {
+    if (LABEL_CACHE.size >= LABEL_CACHE_MAX) {
+      for (const [k, old] of LABEL_CACHE) {
+        if ((old.userData.refs ?? 0) <= 0) {
+          old.map?.dispose(); // per-entry canvas; paper grain maps are shared
+          old.dispose();
+          LABEL_CACHE.delete(k);
+          break;
+        }
+      }
+    }
     const paper = paperMaps();
     // lacquered printed wrapper — sheen + fiber grain is what reads
     // "store-bought firework" instead of "painted cylinder"
@@ -786,7 +878,8 @@ function labelMat(typeName, palette) {
       metalness: 0, envMapIntensity: 0.75,
       emissive: new THREE.Color(palette.a).multiplyScalar(0.14),
     });
-    LABEL_CACHE[key] = m;
+    m.userData.refs = 0;
+    LABEL_CACHE.set(key, m);
   }
   return m;
 }
@@ -840,6 +933,8 @@ export class FireworkItem {
     const root = this.root;
     const woodMat = WOOD_ITEM_MAT;
     const wrapMat = labelMat(this.typeName, this.palette);
+    wrapMat.userData.refs = (wrapMat.userData.refs ?? 0) + 1;
+    this.wrapMat = wrapMat; // released in removeItem
     // per-instance identity: spin the wrap seam so two same-palette pieces
     // from the crate never present byte-identical faces (free — shared
     // geometry + material, only the mesh's rotation differs)
@@ -1157,22 +1252,24 @@ export class FireworkItem {
     this._updateFuse();
   }
 
+  // One fuse segment: stretch `mesh` from `from` to `to` along its local +Y.
+  _fuseSeg(mesh, from, to, hidden) {
+    _fv1.subVectors(to, from);
+    const len = _fv1.length();
+    if (len < 0.004 || hidden) { mesh.visible = false; return; }
+    mesh.visible = true;
+    mesh.position.copy(from);
+    mesh.quaternion.setFromUnitVectors(UP, _fv1.multiplyScalar(1 / len));
+    mesh.scale.y = len;
+  }
+
   // Stretch the live/char fuse tubes between base, burn front and tip, and
   // run the tip bead's glow state. Pure local-space math, no allocations.
   _updateFuse() {
     const anchor = this.fuseAnchor.position;
     const hidden = !!this.beltPts && (this.state === 'active' || this.state === 'spent');
-    const seg = (mesh, from, to) => {
-      _fv1.subVectors(to, from);
-      const len = _fv1.length();
-      if (len < 0.004) { mesh.visible = false; return; }
-      mesh.visible = !hidden;
-      mesh.position.copy(from);
-      mesh.quaternion.setFromUnitVectors(UP, _fv1.multiplyScalar(1 / len));
-      mesh.scale.y = len;
-    };
-    seg(this.fuseLive, this.fuseBase, anchor);
-    seg(this.fuseChar, anchor, this.fuseTip);
+    this._fuseSeg(this.fuseLive, this.fuseBase, anchor, hidden);
+    this._fuseSeg(this.fuseChar, anchor, this.fuseTip, hidden);
     const tip = this.fuseTipSprite;
     if (hidden) { tip.visible = false; return; }
     tip.visible = true;
@@ -1736,6 +1833,7 @@ export class FireworksSystem {
     item.extinguishSounds();
     this.fuseLights.release(item);
     item.fuseTipSprite?.material.dispose(); // per-item (opacity varies); texture is shared
+    if (item.wrapMat) item.wrapMat.userData.refs = Math.max(0, (item.wrapMat.userData.refs ?? 1) - 1);
     item.dispose?.();
     // never leave a hand pointing at a despawned item — that hand could
     // otherwise never grab again
@@ -1833,12 +1931,13 @@ export class FireworksSystem {
         time, randRange(0.2, 0.5),
         randRange(0.012, 0.022), 0.8, 2.2, 0);
     });
-    // gunpowder smoke builds along the belt as it rips
+    // gunpowder smoke builds along the belt as it rips, rolling downwind
     if (item.beltConsumed % 3 === 0) {
+      const wdx = WIND.x * 0.45, wdz = WIND.z * 0.45;
       pool.spawn(2, (i) => {
         pool.set(i,
           px, py + 0.04, pz,
-          randRange(-0.3, 0.3), randRange(0.25, 0.6), randRange(-0.3, 0.3),
+          randRange(-0.3, 0.3) + wdx, randRange(0.25, 0.6), randRange(-0.3, 0.3) + wdz,
           0.42, 0.42, 0.46,
           time, randRange(2.2, 4.4),
           randRange(0.28, 0.5), -0.02, 1.6, -1);
@@ -1943,6 +2042,62 @@ export class FireworksSystem {
     r.flare = null;
   }
 
+  // A charred guide stick tumbling out of a big rocket's break. Debris is
+  // capped FIFO — a long finale can't accumulate scene nodes — and every
+  // stick shares the cached geometry + CHAR_MAT (nothing to dispose).
+  _dropStick(pos, vel, stickLen) {
+    if (this.debris.length >= 8) {
+      const old = this.debris.shift();
+      old.mesh.removeFromParent();
+    }
+    const mesh = new THREE.Mesh(
+      cachedGeo('stick', () => new THREE.CylinderGeometry(0.004, 0.004, 1, 8)),
+      CHAR_MAT,
+    );
+    mesh.scale.y = stickLen;
+    mesh.position.copy(pos);
+    this.debris.push({
+      mesh,
+      vel: new THREE.Vector3(vel.x * 0.3 + randRange(-2, 2), randRange(-1, 1), vel.z * 0.3 + randRange(-2, 2)),
+      angVel: new THREE.Vector3(randRange(-9, 9), randRange(-3, 3), randRange(-9, 9)),
+      rest: false, t: 0,
+    });
+    this.scene.add(mesh);
+  }
+
+  _updateDebris(dt) {
+    for (let i = this.debris.length - 1; i >= 0; i--) {
+      const d = this.debris[i];
+      d.t += dt;
+      if (d.t > 60) { // long enough that the sand remembers the show
+        d.mesh.removeFromParent();
+        this.debris.splice(i, 1);
+        continue;
+      }
+      if (d.rest) continue;
+      d.vel.y -= 9.81 * dt;
+      d.vel.multiplyScalar(1 / (1 + 0.10 * d.vel.length() * dt)); // sticks flutter
+      d.mesh.position.addScaledVector(d.vel, dt);
+      const w = d.angVel.length();
+      if (w > 1e-4) {
+        _fq.setFromAxisAngle(_fv1.copy(d.angVel).multiplyScalar(1 / w), w * dt);
+        d.mesh.quaternion.premultiply(_fq);
+      }
+      const p = d.mesh.position;
+      const gy = this.groundHeight(p.x, p.z);
+      if (p.y <= gy + 0.015) {
+        p.y = gy + 0.015;
+        // one dead-stick thud, then lie flat along the current heading
+        this.audio.play('thud', p, { gain: 0.35, refDistance: 2, rate: randRange(1.2, 1.5) });
+        _fv2.set(0, 1, 0).applyQuaternion(d.mesh.quaternion);
+        _fv1.set(_fv2.x, 0, _fv2.z);
+        if (_fv1.lengthSq() < 0.01) _fv1.set(Math.random() - 0.5, 0, Math.random() - 0.5);
+        d.mesh.quaternion.setFromUnitVectors(UP, _fv1.normalize());
+        d.rest = true;
+      }
+    }
+  }
+
   // The blast of grit and the rolling dust cloud a motor kicks off the pad —
   // the sheet hugs the local dune face (ground normal), not world-XZ, so a
   // launch off a slope blows its dust down the slope. Scorches the sand.
@@ -1999,9 +2154,38 @@ export class FireworksSystem {
     const sound = this.audio.play('fountain', nozzle, {
       gain: 1.0, loop: true, refDistance: 2.5, send: 0.3, hrtf: true,
     });
+    // burn-down: the cone chars from the nozzle toward the base over the
+    // run. The shared wrapper material is cloned ONLY while erupting (and
+    // disposed at the end); the constant program cache key means every
+    // burning fountain ever shares one compiled shader variant.
+    let uBurn = null, burnMat = null;
+    if (item.coneMesh) {
+      uBurn = { value: 0 };
+      burnMat = item.coneMesh.material.clone();
+      burnMat.onBeforeCompile = (sh) => {
+        sh.uniforms.uBurn = uBurn;
+        sh.vertexShader = 'varying float vBurnY;\n' + sh.vertexShader.replace(
+          '#include <begin_vertex>',
+          '#include <begin_vertex>\n\tvBurnY = position.y;',
+        );
+        sh.fragmentShader = 'varying float vBurnY;\nuniform float uBurn;\nfloat burnK;\n'
+          + sh.fragmentShader
+            .replace('#include <color_fragment>',
+              '#include <color_fragment>\n'
+              + '\t// char front sweeps from the nozzle (local y +0.5) down the cone\n'
+              + '\tfloat burnEdge = 0.5 - uBurn * 1.12;\n'
+              + '\tburnK = smoothstep(burnEdge - 0.1, burnEdge + 0.04, vBurnY);\n'
+              + '\tdiffuseColor.rgb *= mix(1.0, 0.1, burnK);')
+            .replace('#include <emissivemap_fragment>',
+              '#include <emissivemap_fragment>\n'
+              + '\ttotalEmissiveRadiance *= mix(1.0, 0.04, burnK);');
+      };
+      burnMat.customProgramCacheKey = () => 'fountain-burn';
+      item.coneMesh.material = burnMat;
+    }
     this.emitters.push({
       kind: 'fountain', item, age: 0, duration: t.duration, sound,
-      phase: Math.random() * 7,
+      phase: Math.random() * 7, uBurn, burnMat,
     });
   }
 
@@ -2215,7 +2399,7 @@ export class FireworksSystem {
     pool.spawn(3, (i) => {
       pool.set(i,
         pos.x, pos.y, pos.z,
-        randRange(-0.3, 0.3), randRange(0.2, 0.6), randRange(-0.3, 0.3),
+        randRange(-0.3, 0.3) + WIND.x * 0.4, randRange(0.2, 0.6), randRange(-0.3, 0.3) + WIND.z * 0.4,
         0.38, 0.38, 0.42,
         time, randRange(1.8, 3.2),
         randRange(0.3, 0.55), -0.015, 1.4, -1);
@@ -3989,15 +4173,18 @@ export class FireworksSystem {
         const nx2 = n.x, ny2 = n.y, nz2 = n.z;
         const sp = 13 + 8 * size; // ~1 s expansion to a 25-30 m figure
         const nPts = pts.length / 3;
+        // ±6% of the expansion speed in depth (a real former isn't flat) and
+        // a dim second copy of the outline shifted off the plane: edge-on
+        // the figure reads as a soft double stroke, never a 1-px line
         let gj = -1, gvx, gvy, gvz, gcr, gcg, gcb, gLife, gLag;
-        pool.spawn(nPts * 3, (i) => {
+        pool.spawn(nPts * 4, (i) => {
           gj++;
-          const seg = gj % 3;
+          const seg = gj % 4;
           if (seg === 0) {
-            const o = ((gj / 3) | 0) * 3;
+            const o = ((gj / 4) | 0) * 3;
             const px2 = pts[o], py2 = pts[o + 1];
             const c = pts[o + 2] ? colB : colA;
-            const jn = randRange(-0.35, 0.35); // whisker of depth
+            const jn = sp * randRange(-0.06, 0.06); // whisker of depth
             gvx = (ux * px2 + wx * py2) * sp + nx2 * jn + dvx + randRange(-0.15, 0.15);
             gvy = (uy * px2 + wy * py2) * sp + ny2 * jn + dvy + randRange(-0.15, 0.15);
             gvz = (uz * px2 + wz * py2) * sp + nz2 * jn + dvz + randRange(-0.15, 0.15);
@@ -4007,12 +4194,21 @@ export class FireworksSystem {
             pool.set(i, pos.x, pos.y, pos.z, gvx, gvy, gvz, gcr, gcg, gcb,
               time, gLife, 0.13 * (0.7 + size * 0.5), 0.22, 0.8, 0,
               CELL.GLOW, 0.035);
-          } else {
+          } else if (seg < 3) {
             const fade = (1 - seg / 3) * 0.55;
             pool.set(i, pos.x, pos.y, pos.z, gvx, gvy, gvz,
               gcr * fade, gcg * fade, gcb * fade,
               time + seg * gLag, gLife * 0.95,
               0.13 * (0.7 + size * 0.5) * 0.7, 0.22, 0.8, 0,
+              CELL.GLOW, 0.035);
+          } else {
+            // the offset plane: same outline point pushed ~0.8 m/s along the
+            // normal, at a third of the light
+            pool.set(i, pos.x, pos.y, pos.z,
+              gvx + nx2 * 0.8, gvy + ny2 * 0.8, gvz + nz2 * 0.8,
+              gcr * 0.33, gcg * 0.33, gcb * 0.33,
+              time + gLag, gLife * 0.9,
+              0.13 * (0.7 + size * 0.5) * 0.8, 0.22, 0.8, 0,
               CELL.GLOW, 0.035);
           }
         });
@@ -4103,7 +4299,7 @@ export class FireworksSystem {
                 leg.x + leg.vx * k + randRange(-0.2, 0.2),
                 leg.y + leg.vy * k - gA * (ts - k) / dF,
                 leg.z + leg.vz * k + randRange(-0.2, 0.2),
-                randRange(-0.25, 0.25), randRange(0.1, 0.45), randRange(-0.25, 0.25),
+                randRange(-0.25, 0.25) + WIND.x * 0.35, randRange(0.1, 0.45), randRange(-0.25, 0.25) + WIND.z * 0.35,
                 0.42, 0.42, 0.45,
                 time + leg.t0 + ts, randRange(2.5, 5),
                 randRange(0.35, 0.65), -0.01, 1.3, -1);
@@ -4120,16 +4316,20 @@ export class FireworksSystem {
                 randRange(0.04, 0.06), 0.55, 0.9, 26);
             }
           });
-          // one pooled light follows the LEAD flare only — flares come in
-          // threes, fountain slots come in twos, and one moving key light
-          // already sells the whole cluster
-          if (f === 0) {
-            this.emitters.push({
-              kind: 'flare', age: 0, duration: L, path, g: gF, d: dF,
-              color: new THREE.Color(col[0], col[1], col[2]), lightSlot: null,
-              intensity: 260 + 240 * Math.min(size, 1.6),
-            });
-          }
+          // every flare tows a little canopy prop down its sway path (the
+          // 15 s dune-lighting descent has to read at close range too), but
+          // only the LEAD flare gets a pooled light — flares come in threes,
+          // fountain slots come in twos, and one moving key light already
+          // sells the whole cluster
+          const canopy = makeFlareCanopy(col);
+          canopy.visible = false; // placed on the first update tick
+          this.scene.add(canopy);
+          this.emitters.push({
+            kind: 'flare', age: 0, duration: L, path, g: gF, d: dF,
+            color: new THREE.Color(col[0], col[1], col[2]), lightSlot: null,
+            intensity: 260 + 240 * Math.min(size, 1.6),
+            lit: f === 0, canopy,
+          });
         }
         break;
       }
@@ -4229,7 +4429,7 @@ export class FireworksSystem {
           const rr = randRange(2.5, 4) * scale2;
           pool.set(i,
             pos.x + Math.cos(a) * rr, pos.y + randRange(0.5, 1.5), pos.z + Math.sin(a) * rr,
-            Math.cos(a) * 0.7, randRange(1.0, 1.8), Math.sin(a) * 0.7,
+            Math.cos(a) * 0.7 + WIND.x * 0.4, randRange(1.0, 1.8), Math.sin(a) * 0.7 + WIND.z * 0.4,
             0.16, 0.15, 0.15,
             time + randRange(0.5, 0.9), randRange(4.5, 7.5),
             randRange(1.2, 2.2) * scale2, -0.02, 1.3, -1);
@@ -4389,6 +4589,11 @@ export class FireworksSystem {
           sound: t.size > 0.75 ? 'big' : t.size > 0.45 ? 'med' : 'small',
           drift: r.vel.clone().multiplyScalar(0.55),
         });
+        // the big rockets leave a body: a charred guide stick tumbles out
+        // of the break, thuds into the dunes and lies there
+        if (item.typeName === 'rocketLarge' || item.typeName === 'rocketGrand') {
+          this._dropStick(r.pos, r.vel, t.stickLen);
+        }
       }
     }
 
@@ -4416,10 +4621,12 @@ export class FireworksSystem {
           e.sound?.stop(0.6);
           this._releaseEmitterLight(e.lightSlot);
           e.lightSlot = null;
+          e.burnMat?.dispose(); // _spend swaps the husk to CHAR_MAT anyway
           this.emitters.splice(i, 1);
           if (this.items.has(item)) this._spend(item);
           continue;
         }
+        if (e.uBurn) e.uBurn.value = n; // the char front tracks the burn
         // ramp up, sustain, sputter out
         const power = n < 0.1 ? n / 0.1 : n > 0.85 ? Math.max(0.15, 1 - (n - 0.85) / 0.15) : 1;
         const nozzle = _v3.set(0, item.nozzleY, 0);
@@ -4544,13 +4751,14 @@ export class FireworksSystem {
           this.schedule(randRange(0.75, 1.05), () => this.audio.play('cracker', fp, {
             gain: 1.25, refDistance: 2.4, send: 0.45, rate: 0.72,
           }));
-          // and the pall of smoke the whole belt earned
+          // and the pall of smoke the whole belt earned, drifting downwind
           const pool = this.pool;
+          const wdx = WIND.x * 0.5, wdz = WIND.z * 0.5;
           pool.spawn(10, (idx) => {
             const a = item.beltPointAt(Math.random(), _v4);
             pool.set(idx,
               a.x + randRange(-0.1, 0.1), a.y + 0.08, a.z + randRange(-0.1, 0.1),
-              randRange(-0.3, 0.3), randRange(0.3, 0.7), randRange(-0.3, 0.3),
+              randRange(-0.3, 0.3) + wdx, randRange(0.3, 0.7), randRange(-0.3, 0.3) + wdz,
               0.40, 0.40, 0.44,
               time, randRange(4, 8),
               randRange(0.4, 0.8), -0.015, 1.4, -1);
@@ -4655,6 +4863,11 @@ export class FireworksSystem {
         if (e.age >= e.duration) {
           this._releaseEmitterLight(e.lightSlot);
           e.lightSlot = null;
+          if (e.canopy) {
+            e.canopy.removeFromParent();
+            e.canopy.userData.mat?.dispose(); // per-flare tint; geo/tex shared
+            e.canopy = null;
+          }
           this.emitters.splice(i, 1);
           continue;
         }
@@ -4662,8 +4875,18 @@ export class FireworksSystem {
         for (let k = 1; k < e.path.length && e.path[k].t0 <= e.age; k++) seg = e.path[k];
         _v3.set(seg.x, seg.y, seg.z);
         _v4.set(seg.vx, seg.vy, seg.vz);
-        ballistic(_v3, _v4, e.age - seg.t0, e.g, e.d, _v3);
-        if (!e.lightSlot) e.lightSlot = this._acquireEmitterLight(e);
+        const legT = e.age - seg.t0;
+        ballistic(_v3, _v4, legT, e.g, e.d, _v3);
+        if (e.canopy) {
+          // the chute rides above the candle and heels away from the swing,
+          // like any pendulum bob's suspension
+          e.canopy.visible = true;
+          e.canopy.position.copy(_v3);
+          ballisticVel(_v4, legT, e.g, e.d, _v4);
+          _v4.y = 6; // mostly-up suspension direction, leaned by the sway
+          e.canopy.quaternion.setFromUnitVectors(UP, _v4.normalize());
+        }
+        if (e.lit !== false && !e.lightSlot) e.lightSlot = this._acquireEmitterLight(e);
         if (e.lightSlot) {
           const L = e.lightSlot.light;
           L.position.copy(_v3);
@@ -4674,18 +4897,25 @@ export class FireworksSystem {
         }
       }
     }
+    this._updateDebris(dt);
     this.flashes.update(dt);
+    this.utilFlashes.update(dt);
     this.flashSprites.update(dt);
+    this.fuseLights.update(time);
     // basin wash from recent bursts dies off quickly (half-life ~150ms)
     this.ambientPulse.energy *= Math.exp(-4.6 * dt);
 
     // feed the particle shader's smoke lighting: the strongest live flash
-    // plus the basin-wide burst wash — this is what makes every shell light
-    // its own smoke from inside, and old smoke bloom when a new one breaks
+    // (either pool — a candle muzzle lights nearby haze too) plus the
+    // basin-wide burst wash — this is what makes every shell light its own
+    // smoke from inside, and old smoke bloom when a new one breaks
     const u = this.pool.uniforms;
     if (u?.uFlashPos) {
       let best = null;
       for (const s of this.flashes.lights) {
+        if (s.peak > 0 && (!best || s.light.intensity > best.light.intensity)) best = s;
+      }
+      for (const s of this.utilFlashes.lights) {
         if (s.peak > 0 && (!best || s.light.intensity > best.light.intensity)) best = s;
       }
       if (best) {
