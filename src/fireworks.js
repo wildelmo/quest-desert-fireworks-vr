@@ -213,6 +213,10 @@ const ITEM_RESTITUTION = 0.25;
 const ITEM_FRICTION = 0.62;      // tangential speed kept per ground hit
 const ITEM_DRAG_K = 0.05;        // quadratic air drag (tumbling cardboard)
 
+// Cake tube firing order: a fixed scramble of the 3x3 grid (built row-major
+// in _buildMesh) so consecutive shots hop corners instead of marching rows.
+const CAKE_FIRE_ORDER = [4, 0, 8, 2, 6, 1, 5, 3, 7];
+
 // ---------------------------------------------------------------------------
 // Pooled burst flash lights — these are what paint the dunes with color.
 // Real bursts light the ground in two phases: a hard white-hot pop at the
@@ -1409,39 +1413,185 @@ export class FireworkItem {
       this.fuseRemaining -= dt;
       const n = clamp(this.fuseRemaining / this.type.fuseTime, 0, 1);
       this.fuseAnchor.position.lerpVectors(this.fuseBase, this.fuseTip, n);
-      // shorten the fuse cord as it burns toward the body
-      const fp = this.fuseLine.geometry.attributes.position;
-      fp.setXYZ(1, this.fuseAnchor.position.x, this.fuseAnchor.position.y, this.fuseAnchor.position.z);
-      fp.needsUpdate = true;
-      // sputtering sparks
+      // sputtering sparks off the burn front
       const p = this.fuseWorldPos(_v1);
-      sys.spawnFuseSparks(p, time, dt);
+      sys.spawnFuseSparks(this, p, time, dt);
       this.sounds.fuse?.setPosition(p);
       if (this.fuseRemaining <= 0) {
         this.sounds.fuse?.stop();
         delete this.sounds.fuse;
         sys.activate(this);
       }
+    } else if ((this.fuseGlow ?? 0) > 0.01 && this.state !== 'active' && this.state !== 'spent') {
+      // torch hovering at the tip: a couple of anticipation sparks before it
+      // actually catches — the 'almost lit' state must be visible
+      sys.spawnFuseGlowSparks(this, this.fuseWorldPos(_v1), time, dt, this.fuseGlow);
+    }
+    // fuseGlow is fed by the torch hand each frame; fade it ourselves so a
+    // withdrawn torch doesn't leave a tip warmed forever
+    if (this.fuseGlow) this.fuseGlow = Math.max(0, this.fuseGlow - dt * 4);
+    this._updateFuse();
+
+    // stale throw state can't survive a plant or a re-grab: the integrator
+    // only ever owns an item that is actually loose in the air
+    if (this.vel && (this.holder || this.state === 'planted' || this.state === 'idle' || this.state === 'held')) {
+      this.vel = null;
+      this.angVel = null;
+      this._bounced = this._grounded = false;
+      this._settle = null;
     }
 
-    // free fall when dropped (belts drape themselves — the rope owns motion)
-    if (!this.beltPts
-      && (this.state === 'lying' || this.state === 'active' || this.state === 'spent') && this.fallVel !== 0) {
-      this.fallVel = Math.max(this.fallVel - 9.81 * dt, -12);
-      this.root.position.y += this.fallVel * dt;
-      const ground = sys.groundHeight(this.root.position.x, this.root.position.z);
-      if (this.root.position.y <= ground + 0.02) {
-        this.root.position.y = ground + 0.02;
-        this.fallVel = 0;
-        if (this.state === 'lying') {
-          // unlit items topple flat; active ones stay as they landed
-          this.root.quaternion.setFromAxisAngle(
-            _v2.set(Math.random() - 0.5, 0, Math.random() - 0.5).normalize(),
-            Math.PI / 2 * 0.96,
-          );
+    // thrown/dropped flight (belts drape themselves — the rope owns motion):
+    // full 3D tumble when the release handed over a velocity (input sets
+    // item.vel/item.angVel — see the hand-off contract); the legacy straight
+    // drop when it didn't
+    if (!this.beltPts && !this.holder
+      && (this.state === 'lying' || this.state === 'active' || this.state === 'spent')) {
+      if (this.vel) {
+        this._integrateFlight(dt, time);
+      } else if (this.fallVel !== 0) {
+        this.fallVel = Math.max(this.fallVel - 9.81 * dt, -12);
+        this.root.position.y += this.fallVel * dt;
+        const ground = sys.groundHeight(this.root.position.x, this.root.position.z);
+        if (this.root.position.y <= ground + 0.02) {
+          this.root.position.y = ground + 0.02;
+          this.fallVel = 0;
+          if (this.state === 'lying') {
+            // unlit items topple flat; active ones stay as they landed
+            this.root.quaternion.setFromAxisAngle(
+              _v2.set(Math.random() - 0.5, 0, Math.random() - 0.5).normalize(),
+              Math.PI / 2 * 0.96,
+            );
+          }
+          sys.audio.play('thud', this.root.position, { gain: 0.7, refDistance: 1.5 });
         }
-        sys.audio.play('thud', this.root.position, { gain: 0.7, refDistance: 1.5 });
       }
+    }
+  }
+
+  /**
+   * Thrown-item flight: ballistic + light quadratic drag + tumble, one soft
+   * bounce off the sand with tangential friction, then an eased settle to a
+   * natural rest pose grown out of the impact orientation. A lit item burns
+   * straight through all of it — its emitters read the root every frame, so
+   * a thrown erupting fountain sprays all along its arc (and keeps spraying
+   * however it lands; hard landings never extinguish anything).
+   */
+  _integrateFlight(dt, time) {
+    const sys = this.system;
+    const v = this.vel;
+
+    if (this._settle) {
+      // easing to rest from the impact orientation
+      const s = this._settle;
+      s.t += dt;
+      const k = Math.min(1, dt * 7);
+      this.root.quaternion.slerp(s.q, k);
+      const gy = sys.groundHeight(this.root.position.x, this.root.position.z) + 0.02;
+      this.root.position.y += (gy - this.root.position.y) * Math.min(1, dt * 9);
+      if (s.t > 0.55) {
+        this.root.quaternion.copy(s.q);
+        this.root.position.y = gy;
+        this.vel = null;
+        this.angVel = null;
+        this._settle = null;
+        this._bounced = this._grounded = false;
+        this.fallVel = 0;
+      }
+      return;
+    }
+
+    // air phase
+    v.y -= 9.81 * dt;
+    const sp = v.length();
+    v.multiplyScalar(1 / (1 + ITEM_DRAG_K * sp * dt));
+    this.root.position.addScaledVector(v, dt);
+    if (this.angVel) {
+      const w = this.angVel.length();
+      if (w > 1e-4) {
+        _fq.setFromAxisAngle(_fv1.copy(this.angVel).multiplyScalar(1 / w), w * dt);
+        this.root.quaternion.premultiply(_fq);
+        this.angVel.multiplyScalar(Math.max(0, 1 - 0.55 * dt)); // spin bleeds off in air
+      }
+    }
+
+    // ground contact: test the item's axis ends (base sits at the root, the
+    // far end grabTop up the local axis) so a tumbling tube touches down on
+    // whichever end actually arrives first
+    const base = this.root.position;
+    this.axis(_fv2);
+    _fv3.copy(base).addScaledVector(_fv2, this.grabTop ?? 0.1);
+    const penBase = sys.groundHeight(base.x, base.z) + 0.015 - base.y;
+    const penTip = sys.groundHeight(_fv3.x, _fv3.z) + 0.015 - _fv3.y;
+    const pen = Math.max(penBase, penTip);
+    if (pen > 0) {
+      base.y += pen;
+      const n = sys._groundNormal(base.x, base.z, _fv2);
+      const vn = v.dot(n);
+      const impact = -vn;
+      if (vn < 0) {
+        if (!this._bounced && impact > 1.4) {
+          // the one bounce: soft restitution, most of the slide ground away
+          this._bounced = true;
+          v.addScaledVector(n, -(1 + ITEM_RESTITUTION) * vn);
+          const kn = v.dot(n);
+          _fv3.copy(n).multiplyScalar(kn);
+          v.sub(_fv3).multiplyScalar(ITEM_FRICTION).add(_fv3);
+          // skid torque: the hit converts travel into tumble
+          if (!this.angVel) this.angVel = new THREE.Vector3();
+          _fv1.crossVectors(n, v);
+          if (_fv1.lengthSq() > 1e-4) {
+            this.angVel.addScaledVector(_fv1.normalize(), Math.min(6, impact * 0.8));
+          }
+        } else {
+          // down for good: grind out whatever motion is left
+          v.addScaledVector(n, -vn);
+          v.multiplyScalar(Math.max(0, 1 - 7 * dt));
+          this.angVel?.multiplyScalar(Math.max(0, 1 - 7 * dt));
+          this._grounded = true;
+        }
+        // landing thud weighted by how hard it came in
+        if (impact > 0.9 && time - (this._thudT ?? -9) > 0.22) {
+          this._thudT = time;
+          sys.audio.play('thud', base, {
+            gain: clamp(0.25 + impact * 0.11, 0.3, 1.1),
+            refDistance: 1.5, rate: randRange(0.92, 1.12),
+          });
+          if (impact > 3.2) {
+            sys._groundSplash(base, _c1.set(0xc9a06a), Math.min(1.1, impact / 9));
+          }
+        }
+      }
+    }
+
+    // slow and grounded: pick the rest pose and ease into it
+    if (this._grounded && v.lengthSq() < 0.09
+      && (!this.angVel || this.angVel.lengthSq() < 0.5)) {
+      if (this.state === 'active') {
+        // an erupting piece stays exactly as it landed — a fountain on its
+        // side hosing sparks across the sand is the whole reward
+        this.vel = null;
+        this.angVel = null;
+        this._bounced = this._grounded = false;
+        this.fallVel = 0;
+        return;
+      }
+      const axis = this.axis(_fv1);
+      const kind = this.type.kind;
+      _fq.copy(this.root.quaternion);
+      if ((kind === 'fountain' || kind === 'cake') && axis.y > 0.75) {
+        // flat-bottomed piece that came down near-upright: rock upright
+        _fv2.copy(axis);
+        _fq.setFromUnitVectors(_fv2, UP).multiply(this.root.quaternion);
+      } else {
+        // everything else keels over along whichever way it was already
+        // leaning (or sliding), and lies there
+        _fv2.set(axis.x, 0, axis.z);
+        if (_fv2.lengthSq() < 0.003) _fv2.set(v.x, 0, v.z);
+        if (_fv2.lengthSq() < 0.003) _fv2.set(Math.random() - 0.5, 0, Math.random() - 0.5);
+        _fq.setFromUnitVectors(UP, _fv2.normalize());
+      }
+      this._settle = { q: _fq.clone(), t: 0 };
     }
   }
 }
@@ -1458,11 +1608,18 @@ export class FireworksSystem {
     this.rockets = [];   // in-flight
     this.emitters = [];  // fountains / candles / cakes running
     this.events = [];    // {time, fn}
+    this.debris = [];    // tumbling charred sticks etc. (capped, FIFO)
     this.time = 0;
-    this.flashes = new FlashPool(scene, 4);
-    this.flashSprites = new FlashSprites(scene, 4);
+    // shell flashes get depth (8 lights / 10 sprites, weakest-evicted);
+    // muzzle-class pops (lifts, candle/cake shots, belt crackers) live in
+    // their own tiny pool so they can never evict a grand shell's afterglow
+    this.flashes = new FlashPool(scene, 8);
+    this.utilFlashes = new FlashPool(scene, 2);
+    this.flashSprites = new FlashSprites(scene, 10, pool.atlas);
+    this.fuseLights = new FuseLightPool(scene, 4);
     this.onBoom = null; // hook for haptics: (pos, size) => {}
-    this._fuseSparkAcc = 0;
+    this._riserT = -9;    // throttle: risers thin out during walls
+    this._padShots = 0;   // every ~4th ground launch feeds the pad haze
 
     // aggregate "the sky just lit up" signal — world.js feeds this into the
     // hemisphere light so a burst overhead washes the whole basin, not just
@@ -1499,6 +1656,60 @@ export class FireworksSystem {
       scene.add(l);
       this.emitterLights.push({ light: l, owner: null });
     }
+
+    // spent-belt confetti: torn red paper scraps left on the sand. One
+    // shared instanced mesh for the whole desert, 64 scraps FIFO — old ones
+    // quietly vanish under new belts, nothing ever allocates mid-session.
+    {
+      const c = document.createElement('canvas');
+      c.width = c.height = 32;
+      const g = c.getContext('2d');
+      g.clearRect(0, 0, 32, 32);
+      g.fillStyle = '#b42222';
+      g.beginPath(); // a ragged little polygon of cracker paper
+      g.moveTo(6, 2); g.lineTo(26, 5); g.lineTo(30, 18); g.lineTo(22, 29);
+      g.lineTo(8, 27); g.lineTo(2, 14);
+      g.closePath(); g.fill();
+      g.fillStyle = '#7c1010';
+      g.fillRect(6, 12, 20, 3);
+      const tex = new THREE.CanvasTexture(c);
+      tex.colorSpace = THREE.SRGBColorSpace;
+      const mesh = new THREE.InstancedMesh(
+        new THREE.PlaneGeometry(0.028, 0.02),
+        new THREE.MeshStandardMaterial({
+          map: tex, alphaTest: 0.5, side: THREE.DoubleSide,
+          roughness: 0.8, emissive: 0x30060a,
+        }),
+        64,
+      );
+      _bm.makeScale(0, 0, 0);
+      for (let i = 0; i < 64; i++) {
+        mesh.setMatrixAt(i, _bm);
+        _c1.setHSL(0.995 + Math.random() * 0.015, 0.85, 0.4 + Math.random() * 0.2);
+        mesh.setColorAt(i, _c1);
+      }
+      mesh.frustumCulled = false;
+      mesh.castShadow = false;
+      mesh.receiveShadow = true;
+      scene.add(mesh);
+      this.scrapMesh = mesh;
+      this._scrapCursor = 0;
+    }
+  }
+
+  // Lay one paper scrap flat on the sand (spent-belt litter).
+  _dropScrap(x, z) {
+    const mesh = this.scrapMesh;
+    const i = this._scrapCursor;
+    this._scrapCursor = (this._scrapCursor + 1) % 64;
+    const y = this.groundHeight(x, z) + 0.006;
+    this._groundNormal(x, z, _bn);
+    _bq.setFromUnitVectors(_bt.set(0, 0, 1), _bn); // plane faces up the slope normal
+    _fq.setFromAxisAngle(_bn, Math.random() * Math.PI * 2);
+    _bq.premultiply(_fq);
+    _bm.compose(_bp.set(x, y, z), _bq, _bs.setScalar(randRange(0.8, 1.4)));
+    mesh.setMatrixAt(i, _bm);
+    mesh.instanceMatrix.needsUpdate = true;
   }
 
   _acquireEmitterLight(owner) {
@@ -1523,7 +1734,8 @@ export class FireworksSystem {
 
   removeItem(item) {
     item.extinguishSounds();
-    item.fuseLine?.geometry.dispose(); // per-item buffer, unlike the cached meshes
+    this.fuseLights.release(item);
+    item.fuseTipSprite?.material.dispose(); // per-item (opacity varies); texture is shared
     item.dispose?.();
     // never leave a hand pointing at a despawned item — that hand could
     // otherwise never grab again
@@ -1553,6 +1765,8 @@ export class FireworksSystem {
   // ---- ignition outcomes ----
 
   activate(item) {
+    // fuse burned down: the tube owns the light now
+    this.fuseLights.release(item);
     const kind = item.type.kind;
     if (kind === 'rocket') this._launchRocket(item);
     else if (kind === 'fountain') this._startFountain(item);
@@ -1635,24 +1849,39 @@ export class FireworksSystem {
     kick.pp.x -= randRange(-1.7, 1.7) * 0.016;
     kick.pp.y -= randRange(0.9, 2.8) * 0.016;
     kick.pp.z -= randRange(-1.7, 1.7) * 0.016;
-    // occasional visible flash on the surroundings
-    if (Math.random() < 0.12) this.flashes.flash(pos, 0xffd9a8, 5 + Math.random() * 7, 0.05);
+    // occasional visible flash on the surroundings (muzzle-class — the
+    // utility pool, so a ripping belt can't strip a shell's afterglow)
+    if (Math.random() < 0.12) this.utilFlashes.flash(pos, 0xffd9a8, 5 + Math.random() * 7, 0.05);
   }
 
   _spendBelt(item) {
     if (!this.items.has(item)) return;
     item.state = 'spent';
     item.extinguishSounds();
-    // nothing left but the charred braid cord on the sand
+    // nothing left but the charred braid cord on the sand...
     item.cordLine.material = BELT_CORD_CHAR_MAT;
-    // give the rope a moment to settle, then stop simulating it entirely
+    // ...plus torn paper and a scorch trail where the rip ran the cord
+    const scraps = 3 + ((Math.random() * 3) | 0);
+    for (let s = 0; s < scraps; s++) {
+      const p = item.beltPointAt(Math.random(), _v1);
+      this._dropScrap(p.x + randRange(-0.06, 0.06), p.z + randRange(-0.06, 0.06));
+    }
+    for (let s = 0; s < 4; s++) {
+      const p = item.beltPointAt((s + 0.5) / 4, _v1);
+      this.groundMark?.(p.x, p.z, randRange(0.08, 0.14), 0.35);
+    }
+    this.audio.play('rustle', item.beltPointAt(0.5, _v1), { gain: 0.5, refDistance: 1.2 });
+    // give the rope a moment to settle, then stop simulating it entirely;
+    // the charred cord stays as evidence for a good while
     this.schedule(3, () => { item.beltStatic = true; });
-    this.schedule(18, () => this.removeItem(item));
+    this.schedule(45, () => this.removeItem(item));
   }
 
   _launchRocket(item) {
     item.state = 'active';
-    item.fallVel = 0; // flight integrator owns the motion now
+    item.fallVel = 0;   // flight integrator owns the motion now
+    item.vel = null;    // ...including over any throw the hand handed off
+    item.angVel = null;
     // gripped like a real bottle rocket: your hand pins it down, so the
     // motor burns (and the timer runs) right where you hold it — the update
     // loop hands it over to free flight the moment you let go
@@ -1714,29 +1943,48 @@ export class FireworksSystem {
     r.flare = null;
   }
 
-  // The blast of grit and the rolling dust cloud a motor kicks off the pad.
+  // The blast of grit and the rolling dust cloud a motor kicks off the pad —
+  // the sheet hugs the local dune face (ground normal), not world-XZ, so a
+  // launch off a slope blows its dust down the slope. Scorches the sand.
   _padDust(pos, size) {
     const pool = this.pool;
     const time = this.time;
     pos.y = this.groundHeight(pos.x, pos.z);
-    // sharp radial sand kick
+    this.groundMark?.(pos.x, pos.z, 0.28 + 0.3 * size, 0.45);
+    // slope basis: u/w span the ground plane, n lifts off it
+    const n = this._groundNormal(pos.x, pos.z, _fv1);
+    const u = _fv2.crossVectors(n, Math.abs(n.x) < 0.9 ? X_AXIS : UP).normalize();
+    const w = _fv3.crossVectors(n, u).normalize();
+    const nx = n.x, ny = n.y, nz = n.z;
+    const ux2 = u.x, uy2 = u.y, uz2 = u.z;
+    const wx2 = w.x, wy2 = w.y, wz2 = w.z;
+    // sharp radial sand kick, sprayed in the ground plane
     pool.spawn(24 + Math.round(20 * size), (i) => {
       const a = Math.random() * Math.PI * 2;
+      const ca = Math.cos(a), sa = Math.sin(a);
       const sp = randRange(1.5, 4.2) * (0.6 + size);
+      const lift = randRange(0.4, 1.6);
       pool.set(i,
-        pos.x + Math.cos(a) * 0.05, pos.y + 0.04, pos.z + Math.sin(a) * 0.05,
-        Math.cos(a) * sp, randRange(0.4, 1.6), Math.sin(a) * sp,
+        pos.x + (ux2 * ca + wx2 * sa) * 0.05, pos.y + 0.04, pos.z + (uz2 * ca + wz2 * sa) * 0.05,
+        (ux2 * ca + wx2 * sa) * sp + nx * lift,
+        (uy2 * ca + wy2 * sa) * sp + ny * lift,
+        (uz2 * ca + wz2 * sa) * sp + nz * lift,
         0.85, 0.62, 0.34,
         time, randRange(0.4, 0.9),
         randRange(0.02, 0.05), 1.3, 2.6, 0);
     });
-    // billowing dust that hangs around the pad after the rocket is gone
+    // billowing dust that hangs around the pad and rides the night's wind
+    const wdx = WIND.x * 0.6, wdz = WIND.z * 0.6;
     pool.spawn(9 + Math.round(8 * size), (i) => {
       const a = Math.random() * Math.PI * 2;
+      const ca = Math.cos(a), sa = Math.sin(a);
       const sp = randRange(0.5, 1.5) * (0.6 + size);
+      const lift = randRange(0.25, 0.8);
       pool.set(i,
         pos.x, pos.y + 0.15, pos.z,
-        Math.cos(a) * sp, randRange(0.25, 0.8), Math.sin(a) * sp,
+        (ux2 * ca + wx2 * sa) * sp + nx * lift + wdx,
+        (uy2 * ca + wy2 * sa) * sp + ny * lift,
+        (uz2 * ca + wz2 * sa) * sp + nz * lift + wdz,
         0.46, 0.36, 0.24,
         time, randRange(1.8, 3.2),
         randRange(0.45, 0.85) * (0.6 + size), -0.02, 1.8, -1);
@@ -1807,7 +2055,14 @@ export class FireworksSystem {
     item.root.localToWorld(muzzle);
     const dir = item.axis(new THREE.Vector3());
     this.audio.play('shot', muzzle, { gain: 1.0, refDistance: 3, send: 0.3, rate: randRange(0.9, 1.15) });
-    this.flashes.flash(muzzle, item.palette.a, 35, 0.14);
+    this.utilFlashes.flash(muzzle, item.palette.a, 35, 0.14);
+    // each shot chars the tube a little further down from the mouth
+    if (item.charSleeve) {
+      const frac = (index + 1) / item.type.shots;
+      const len = item.type.bodyLen * frac * 0.92;
+      item.charSleeve.scale.y = Math.max(0.002, len);
+      item.charSleeve.position.y = item.type.bodyLen - len / 2;
+    }
 
     // comet star — bounces off the sand if the candle is aimed at the ground
     const col = new THREE.Color(index % 2 ? item.palette.a : item.palette.b);
@@ -1838,8 +2093,14 @@ export class FireworksSystem {
 
   _cakeShot(item, index, isFinale) {
     if (!this.items.has(item)) return;
-    const muzzle = new THREE.Vector3(randRange(-0.05, 0.05), item.nozzleY, randRange(-0.05, 0.05));
+    // fire from the REAL tubes, dancing around the 3x3 grid in a fixed
+    // scramble so successive shots come from different corners of the box
+    const tube = item.cakeTubes?.[CAKE_FIRE_ORDER[index % 9]];
+    const muzzle = tube
+      ? new THREE.Vector3(tube.position.x, item.nozzleY, tube.position.z)
+      : new THREE.Vector3(randRange(-0.05, 0.05), item.nozzleY, randRange(-0.05, 0.05));
     item.root.localToWorld(muzzle);
+    if (tube) tube.material = CHAR_MAT; // the rim blackens the moment it fires
     const dir = item.axis(new THREE.Vector3());
     // slight per-shot spread
     dir.x += randRange(-0.09, 0.09);
@@ -1847,7 +2108,22 @@ export class FireworksSystem {
     dir.normalize();
 
     this.audio.play('lift', muzzle, { gain: 1.2, refDistance: 4, send: 0.4, rate: randRange(0.9, 1.1) });
-    this.flashes.flash(muzzle, 0xffc890, 55, 0.16);
+    this.utilFlashes.flash(muzzle, 0xffc890, 55, 0.16);
+    // muzzle smoke curling off the fired tube
+    {
+      const pool = this.pool;
+      const time = this.time;
+      const mx = muzzle.x, my = muzzle.y, mz = muzzle.z;
+      const wdx = WIND.x * 0.5, wdz = WIND.z * 0.5;
+      pool.spawn(2, (i) => {
+        pool.set(i,
+          mx, my + 0.02, mz,
+          randRange(-0.15, 0.15) + wdx, randRange(0.3, 0.7), randRange(-0.15, 0.15) + wdz,
+          0.4, 0.4, 0.44,
+          time, randRange(1.6, 3.0),
+          randRange(0.14, 0.24), -0.02, 1.6, -1);
+      });
+    }
 
     // real mortar pacing: the star streaks upward for a couple of seconds,
     // goes quiet near apex, THEN breaks — bursts land 50-70 m up
@@ -1859,7 +2135,7 @@ export class FireworksSystem {
       ? randPick(['multibreak', 'palm', 'dahlia', 'chrys', 'brocade', 'serpents', 'kamuro', 'timerain', 'saturn', 'thousandbloom', 'strobewillow', 'farfalle'])
       : randPick(['peony', 'dahlia', 'ring', 'crackle', 'strobe', 'willow', 'serpents', 'ghost', 'saturn', 'leaves', 'spider', 'dragoneggs', 'bees', 'tourbillon']);
     this._fireShot(muzzle, vel, col, 1.35, {
-      gravity: 0.9, drag: 0.35, flightT,
+      gravity: 0.9, drag: 0.35, flightT, pattern,
       onBurst: (p, v) => this.burst(p, {
         pattern,
         size: isFinale ? 1.25 : 0.6,
@@ -1889,13 +2165,13 @@ export class FireworksSystem {
     this.audio.play('lift', pos, {
       gain: 1.25, refDistance: 4, send: 0.45, rate: randRange(0.88, 1.08), delayBySound: true,
     });
-    this.flashes.flash(_v2.copy(pos).setY(pos.y + 0.4), 0xffc890, 60, 0.18);
+    this.utilFlashes.flash(_v2.copy(pos).setY(pos.y + 0.4), 0xffc890, 60, 0.18);
     const palette = opts.palette ?? randPick(PALETTES);
     const size = opts.size ?? 1;
     const vel = dir.clone().multiplyScalar(opts.speed ?? 52);
     this._fireShot(pos.clone(), vel, new THREE.Color(palette.a), 1.5, {
       gravity: 0.9, drag: 0.35, flightT: opts.flightT ?? 2.8,
-      tail: opts.tail,
+      tail: opts.tail, pattern: opts.pattern,
       onBurst: (p, v) => {
         if (opts.burst === false) this._fizzle(p, palette);
         else {
@@ -1979,8 +2255,9 @@ export class FireworksSystem {
         gain: 1.15, refDistance: 4, send: 0.4, rate: randRange(1.0, 1.18), delayBySound: true,
       });
     }
-    this.flashes.flash(_v4.copy(pos).setY(pos.y + 0.6), palette.a, 38 + 46 * size, 0.3);
+    this.utilFlashes.flash(_v4.copy(pos).setY(pos.y + 0.6), palette.a, 38 + 46 * size, 0.3);
     this._padDust(pos.clone(), size);
+    this.groundMark?.(pos.x, pos.z, 0.5 + 0.4 * size, 0.6); // mines burn their pit black
 
     const spMul = 0.7 + size * 0.5;
     const grav = 1.0, drg = 0.55;
@@ -2086,12 +2363,17 @@ export class FireworksSystem {
     if (!this.items.has(item)) return;
     item.state = 'spent';
     item.extinguishSounds();
-    // char the item (shared material — item visuals are palette-cached),
-    // fade it away a bit later
+    // char the item (shared material — item visuals are palette-cached);
+    // the husk stands as evidence for a good while before fading away
     item.root.traverse((o) => {
       if (o.isMesh) o.material = CHAR_MAT;
     });
-    this.schedule(25, () => this.removeItem(item));
+    // scorch the sand under a piece that burned out on (or near) it
+    const p = item.root.getWorldPosition(_v1);
+    if (p.y - this.groundHeight(p.x, p.z) < 0.5) {
+      this.groundMark?.(p.x, p.z, 0.16 + item.type.size * 0.14, 0.5);
+    }
+    this.schedule(90, () => this.removeItem(item));
   }
 
   // ---- ground contact ----
@@ -2128,6 +2410,74 @@ export class FireworksSystem {
    */
   _fireShot(pos, vel, color, sizeMul, opts, bounceNum = 0) {
     const { gravity, drag, flightT } = opts;
+
+    if (bounceNum === 0) {
+      // riser voices: whistling inserts (serpents, tourbillons, fish)
+      // announce themselves on the way up; big display comets get a quiet
+      // secondary whoosh with the receding pitch ramp the rockets use.
+      // Throttled — a finale wall stays a wall of reports, not thirty
+      // overlapping whooshes.
+      const whistler = opts.pattern === 'serpents' || opts.pattern === 'tourbillon'
+        || opts.pattern === 'fish';
+      if ((whistler || sizeMul >= 1.2) && this.time - this._riserT > 0.28) {
+        this._riserT = this.time;
+        if (whistler) {
+          const h = this.audio.play('whistle', pos, {
+            gain: 0.55, refDistance: 5, send: 0.35, rate: randRange(0.92, 1.12), delayBySound: true,
+          });
+          if (h) { // pyro whistles sweep upward as the insert climbs
+            const pr = h.source.playbackRate;
+            pr.setTargetAtTime(pr.value * 1.18, this.audio.ctx.currentTime, flightT * 0.45);
+          }
+        } else {
+          const h = this.audio.play('whoosh', pos, {
+            gain: 0.3, refDistance: 4, send: 0.3, rate: randRange(0.95, 1.1), delayBySound: true,
+          });
+          if (h) this._recedeWhoosh(h);
+        }
+      }
+      // ground-launch theater: a mortar or cake tube coughs grit and muzzle
+      // smoke; every ~4th launch also feeds a long-hanging haze puff, so a
+      // battery that has been firing for a minute stands in its own shroud
+      // (lit from inside by later breaks — that's the payoff)
+      const gy = this.groundHeight(pos.x, pos.z);
+      if (sizeMul >= 1.2 && pos.y - gy < 0.6) {
+        const pool = this.pool;
+        const time = this.time;
+        const px = pos.x, py = pos.y, pz = pos.z;
+        const wdx = WIND.x, wdz = WIND.z;
+        pool.spawn(8, (i) => {
+          const a = Math.random() * Math.PI * 2;
+          const sp = randRange(0.8, 2.4);
+          pool.set(i,
+            px, py + 0.05, pz,
+            Math.cos(a) * sp, randRange(0.3, 1.2), Math.sin(a) * sp,
+            0.8, 0.6, 0.34,
+            time, randRange(0.35, 0.7),
+            randRange(0.02, 0.04), 1.2, 2.6, 0);
+        });
+        pool.spawn(3, (i) => {
+          pool.set(i,
+            px, py + 0.2, pz,
+            randRange(-0.2, 0.2) + wdx * 0.5, randRange(0.4, 0.9), randRange(-0.2, 0.2) + wdz * 0.5,
+            0.42, 0.42, 0.46,
+            time, randRange(2.0, 3.5),
+            randRange(0.3, 0.55), -0.02, 1.6, -1);
+        });
+        this.groundMark?.(px, pz, 0.35, 0.3);
+        this._padShots++;
+        if (this._padShots % 4 === 0) {
+          pool.spawn(2, (i) => {
+            pool.set(i,
+              px + randRange(-0.6, 0.6), py + randRange(0.8, 1.8), pz + randRange(-0.6, 0.6),
+              wdx * 0.45 + randRange(-0.1, 0.1), randRange(0.1, 0.3), wdz * 0.45 + randRange(-0.1, 0.1),
+              0.30, 0.30, 0.33, // low albedo: the shroud reads by depth, not density
+              time, randRange(12, 20),
+              randRange(1.6, 2.6), -0.006, 1.1, -1);
+          });
+        }
+      }
+    }
 
     // march the arc looking for a ground strike
     let tHit = -1;
@@ -2185,19 +2535,76 @@ export class FireworksSystem {
 
   // ---- particles ----
 
-  spawnFuseSparks(pos, time, dt) {
-    this._fuseSparkAcc += dt * 90;
-    const n = Math.floor(this._fuseSparkAcc);
-    this._fuseSparkAcc -= n;
+  /**
+   * Per-item fuse fire: a steady fizz plus Poisson gouts — irregular spitting
+   * bursts of 6-10 stretched sparks with the odd grey wisp, each fuse on its
+   * own clock (two burning fuses must sputter independently, so the old
+   * shared accumulator is gone).
+   */
+  spawnFuseSparks(item, pos, time, dt) {
+    const pool = this.pool;
+    const px = pos.x, py = pos.y, pz = pos.z;
+    // baseline fizz
+    item._fuseAcc = (item._fuseAcc ?? Math.random()) + dt * 34;
+    const n = Math.floor(item._fuseAcc);
+    item._fuseAcc -= n;
+    if (n > 0) {
+      pool.spawn(n, (i) => {
+        pool.set(i,
+          px + randRange(-0.008, 0.008), py + randRange(-0.008, 0.008), pz + randRange(-0.008, 0.008),
+          randRange(-0.5, 0.5), randRange(0.1, 0.9), randRange(-0.5, 0.5),
+          1.0, 0.75, 0.3,
+          time, randRange(0.15, 0.45),
+          randRange(0.008, 0.02), 0.35, 2.5, 0);
+      });
+    }
+    // the gouts: the fuse finds a pocket of powder and SPITS
+    item._fuseGout = (item._fuseGout ?? randRange(0.1, 0.4)) - dt;
+    if (item._fuseGout <= 0) {
+      item._fuseGout = randRange(0.14, 0.55);
+      const burst = 6 + ((Math.random() * 5) | 0);
+      pool.spawn(burst, (i) => {
+        const sp = randRange(0.7, 2.1);
+        const a = Math.random() * Math.PI * 2;
+        const u = randRange(-0.3, 1);
+        const rr = Math.sqrt(1 - u * u);
+        pool.set(i,
+          px, py, pz,
+          rr * Math.cos(a) * sp, u * sp + 0.4, rr * Math.sin(a) * sp,
+          Math.random() < 0.3 ? 3.4 : 1.3, Math.random() < 0.5 ? 1.0 : 0.7, 0.3,
+          time, randRange(0.2, 0.55),
+          randRange(0.01, 0.022), 0.5, 1.9, 0,
+          Math.random() < 0.3 ? CELL.STAR6 : CELL.GLOW, 0.05);
+      });
+      if (Math.random() < 0.35) { // a wisp of grey off the burn front
+        pool.spawn(1, (i) => {
+          pool.set(i,
+            px, py + 0.01, pz,
+            WIND.x * 0.3 + randRange(-0.06, 0.06), randRange(0.12, 0.3), WIND.z * 0.3 + randRange(-0.06, 0.06),
+            0.42, 0.42, 0.45,
+            time, randRange(1.2, 2.4),
+            randRange(0.05, 0.1), -0.02, 1.5, -1);
+        });
+      }
+    }
+  }
+
+  // The torch is CLOSE: the tip cooks and throws a couple of anticipation
+  // sparks before it actually catches (driven by item.fuseGlow, 0..1).
+  spawnFuseGlowSparks(item, pos, time, dt, glow) {
+    item._fuseAcc = (item._fuseAcc ?? Math.random()) + dt * 10 * glow;
+    const n = Math.floor(item._fuseAcc);
+    item._fuseAcc -= n;
     if (n <= 0) return;
     const pool = this.pool;
+    const px = pos.x, py = pos.y, pz = pos.z;
     pool.spawn(n, (i) => {
       pool.set(i,
-        pos.x + randRange(-0.008, 0.008), pos.y + randRange(-0.008, 0.008), pos.z + randRange(-0.008, 0.008),
-        randRange(-0.5, 0.5), randRange(0.1, 0.9), randRange(-0.5, 0.5),
-        1.0, 0.75, 0.3,
-        time, randRange(0.15, 0.45),
-        randRange(0.008, 0.02), 0.35, 2.5, 0);
+        px + randRange(-0.006, 0.006), py + randRange(-0.006, 0.006), pz + randRange(-0.006, 0.006),
+        randRange(-0.25, 0.25), randRange(0.1, 0.5), randRange(-0.25, 0.25),
+        1.1, 0.7, 0.25,
+        time, randRange(0.12, 0.3),
+        randRange(0.006, 0.014), 0.3, 2.4, 0);
     });
   }
 
@@ -2288,20 +2695,58 @@ export class FireworksSystem {
     });
   }
 
-  spawnTrail(pos, vel, dt, time, size) {
+  /**
+   * Motor exhaust in three passes: white-hot grit right off the nozzle,
+   * flame tinted by the shell's own colors blended toward white-hot, and a
+   * long-life grey smoke column that keeps hanging (and drifting downwind)
+   * after the rocket is gone — every rise leaves a trace in the air.
+   */
+  spawnTrail(pos, vel, dt, time, size, palette) {
     const pool = this.pool;
-    const count = Math.max(1, Math.round(dt * 220 * (0.5 + size)));
-    pool.spawn(count, (i) => {
+    const px = pos.x, py = pos.y, pz = pos.z;
+    const vx = vel.x, vy = vel.y, vz = vel.z;
+    // flame tone: the palette's star color pushed most of the way to furnace
+    const c = _c1.set(palette?.a ?? 0xffab42);
+    const fr = c.r + (1 - c.r) * 0.62, fg = c.g + (1 - c.g) * 0.5, fb = c.b + (1 - c.b) * 0.3;
+    const grit = Math.max(1, Math.round(dt * 130 * (0.5 + size)));
+    pool.spawn(grit, (i) => {
       const back = Math.random() * dt;
       pool.set(i,
-        pos.x - vel.x * back + randRange(-0.015, 0.015),
-        pos.y - vel.y * back + randRange(-0.015, 0.015),
-        pos.z - vel.z * back + randRange(-0.015, 0.015),
+        px - vx * back + randRange(-0.012, 0.012),
+        py - vy * back + randRange(-0.012, 0.012),
+        pz - vz * back + randRange(-0.012, 0.012),
+        randRange(-1.6, 1.6), randRange(-1.8, 0.4), randRange(-1.6, 1.6),
+        2.4, 2.0, 1.4,
+        time - back, randRange(0.1, 0.3),
+        randRange(0.012, 0.028) * (0.6 + size), 0.5, 2.2, 0,
+        CELL.GLOW, 0.05);
+    });
+    const flame = Math.max(1, Math.round(dt * 110 * (0.5 + size)));
+    pool.spawn(flame, (i) => {
+      const back = Math.random() * dt;
+      pool.set(i,
+        px - vx * back + randRange(-0.015, 0.015),
+        py - vy * back + randRange(-0.015, 0.015),
+        pz - vz * back + randRange(-0.015, 0.015),
         randRange(-1.2, 1.2), randRange(-1.5, 0.4), randRange(-1.2, 1.2),
-        1.0, 0.62, 0.22,
+        fr * 1.6, fg * 1.3, fb * 0.9,
         time - back, randRange(0.3, 0.8),
         randRange(0.02, 0.045) * (0.6 + size), 0.4, 2.2, 0);
     });
+    // the hanging column (cheap: a few long-lived puffs per second of burn)
+    const smoke = Math.floor(dt * 26 * (0.5 + size) + Math.random());
+    if (smoke > 0) {
+      const wdx = WIND.x * 0.55, wdz = WIND.z * 0.55;
+      pool.spawn(smoke, (i) => {
+        const back = Math.random() * dt;
+        pool.set(i,
+          px - vx * back, py - vy * back, pz - vz * back,
+          wdx + randRange(-0.2, 0.2), randRange(0.05, 0.35), wdz + randRange(-0.2, 0.2),
+          0.38, 0.38, 0.42,
+          time - back, randRange(2.5, 4.0),
+          randRange(0.22, 0.42) * (0.6 + size), -0.012, 1.4, -1);
+      });
+    }
   }
 
   /**
@@ -2364,20 +2809,54 @@ export class FireworksSystem {
 
       // lingering smoke haze: a real occluding cloud (albedo, lit by the
       // moon and by later bursts — see the particle shader) that swells and
-      // drifts downwind after the stars die. What keeps a big shell from
-      // just vanishing into clean air, and what the next shell lights up.
+      // drifts on the shared desert WIND after the stars die. What keeps a
+      // big shell from vanishing into clean air, and what the next shell
+      // lights up. Big shells hang more of it, for longer.
+      const bigShell = size > 0.9;
       if (size > 0.3) {
-        pool.spawn(10 + Math.round(12 * size), (i) => {
+        const wdx = WIND.x * 0.55, wdz = WIND.z * 0.55;
+        pool.spawn(bigShell ? Math.round(18 + 22 * size) : 10 + Math.round(12 * size), (i) => {
           const u = Math.random() * 2 - 1;
           const a = Math.random() * Math.PI * 2;
           const rr = Math.sqrt(1 - u * u);
           const sp = randRange(1.2, 3.2) * (0.5 + size);
           pool.set(i,
             pos.x, pos.y, pos.z,
-            rr * Math.cos(a) * sp + dvx * 0.4 + 0.5, u * sp * 0.6 + dvy * 0.3 + 0.25, rr * Math.sin(a) * sp + dvz * 0.4,
+            rr * Math.cos(a) * sp + dvx * 0.4 + wdx, u * sp * 0.6 + dvy * 0.3 + 0.25, rr * Math.sin(a) * sp + dvz * 0.4 + wdz,
             0.34 + colA.r * 0.10, 0.34 + colA.g * 0.10, 0.37 + colA.b * 0.10,
-            time, randRange(3.5, 6.5) * (0.7 + size * 0.5),
+            time, bigShell ? randRange(6, 11) : randRange(3.5, 6.5) * (0.7 + size * 0.5),
             randRange(0.9, 1.6) * (0.5 + size), -0.012, 1.2, -1);
+        });
+      }
+      if (bigShell) {
+        // the smoke ring: a real shell leaves a slowly widening torus on
+        // its burst plane, hanging long after the color is gone
+        const wdx = WIND.x * 0.5, wdz = WIND.z * 0.5;
+        const ringN = 15 + Math.round(6 * size);
+        pool.spawn(ringN, (i) => {
+          const a = (i / ringN) * Math.PI * 2 + Math.random() * 0.25;
+          const sp = randRange(2.4, 3.4) * (0.6 + size * 0.4);
+          pool.set(i,
+            pos.x + Math.cos(a) * 0.6, pos.y + randRange(-0.3, 0.3), pos.z + Math.sin(a) * 0.6,
+            Math.cos(a) * sp + dvx * 0.3 + wdx, randRange(-0.1, 0.35), Math.sin(a) * sp + dvz * 0.3 + wdz,
+            0.32, 0.32, 0.35,
+            time + randRange(0.1, 0.5), randRange(7, 11),
+            randRange(1.0, 1.7) * (0.5 + size * 0.5), -0.008, 0.75, -1);
+        });
+        // heavy fallout: slow embers that actually REACH the sand and die
+        // there as coals (the pool's aGroundY settling holds them on the
+        // dunes) — after a grand shell the ground below glitters and cools
+        pool.spawn(18 + Math.round(12 * Math.min(size, 1.6)), (i) => {
+          const u = Math.random() * 2 - 1;
+          const a = Math.random() * Math.PI * 2;
+          const rr = Math.sqrt(1 - u * u);
+          const sp = randRange(3, 8);
+          pool.set(i,
+            pos.x, pos.y, pos.z,
+            rr * Math.cos(a) * sp + dvx * 0.5, u * sp * 0.6 - 1 + dvy * 0.4, rr * Math.sin(a) * sp + dvz * 0.5,
+            2.3, 1.15, 0.35,
+            time, randRange(6, 9),
+            randRange(0.05, 0.09), 0.55, 0.35, 7);
         });
       }
     }
@@ -3857,7 +4336,7 @@ export class FireworksSystem {
 
         // exhaust
         if (burning) {
-          this.spawnTrail(r.pos, r.vel, dt, time, r.item.type.size);
+          this.spawnTrail(r.pos, r.vel, dt, time, r.item.type.size, r.item.palette);
           if (r.flare) {
             // ride the nozzle, flickering like real motor exhaust
             r.flare.position.copy(r.pos).addScaledVector(_v1, r.flareOffset);

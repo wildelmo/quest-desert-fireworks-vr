@@ -527,16 +527,21 @@ export class FinaleShow {
       const rests = [T(20.9), T(34.0)];
       let restI = 0;
       const LYRIC = [T(23.9), T(27.1)]; // held for the lone scarlet peony
-      let bar = T(15.6), k = 0;
+      let bar = T(15.6), k = 0, sprintBars = -1; // -1 armed, 4..1 running, 0 spent
       while (bar < T(43.5)) {
         // a bar that would collide with an all-pad hit steps past it — the
         // hit takes that beat, the pulse never stops
         const hit = hitTimes.find((h) => Math.abs(bar - h) < 1.15);
         if (hit) bar = hit + randRange(1.2, 1.5);
         if (bar >= LYRIC[0] && bar < LYRIC[1]) bar = LYRIC[1] + randRange(0, 0.2);
+        // the double-time passage: exactly FOUR bars at half stride, armed
+        // by the first bar past T(30.4) — a window test here let a bar at
+        // 30.3 stride 1.6 s across half the passage
+        if (sprintBars < 0 && bar >= T(30.4)) sprintBars = 4;
+        const sprint = sprintBars > 0;
+        if (sprint) sprintBars--;
         const pal = (bar < T(30) ? ROT_A : ROT_B)[k % 4];
         const statement = k % 4 === 0; // the red bar: bigger, slower, mid band
-        const sprint = bar >= T(30.4) && bar < T(33.9); // the double-time bars
         // odd bars borrow a pontoon pad: same volley, one break nearer the
         // camp — cheap depth the real barges get for free
         const group = k % 2 ? [...ODDS, 9 + (k % 5)] : EVENS;
