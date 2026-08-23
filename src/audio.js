@@ -6,15 +6,22 @@
 // hit hard without clipping.
 
 import * as THREE from 'three';
+import { clamp } from './utils.js';
 import {
   renderBoom, renderCrackle, renderWhoosh, renderLift, renderFuseLoop,
   renderFountainLoop, renderPinwheelLoop, renderShot, renderTorchLoop,
   renderWindLoop, renderThud, renderTick, renderDesertIR,
   renderFirecrackerLoop, renderCrackerPop, renderWaterfallLoop,
-  renderColossusLoop, renderGroan,
+  renderColossusLoop, renderGroan, renderRustle, renderCrunch,
+  renderKnock, renderSwing, renderWhistle, renderCreak,
 } from './synth.js';
 
 const SPEED_OF_SOUND = 340;
+
+// live one-shot voices allowed before new low-priority plays are refused —
+// beyond this the belt/finale pileups were only "surviving" because the
+// brick-wall limiter apologized for them
+const VOICE_CAP = 48;
 
 export class AudioEngine {
   constructor() {
@@ -25,6 +32,10 @@ export class AudioEngine {
     this._up = new THREE.Vector3();
     this._quat = new THREE.Quaternion();
     this.listenerPos = new THREE.Vector3(0, 1.6, 0);
+    this._bags = {};        // per-sample shuffle bags (no immediate repeats)
+    this._lastVariant = {};
+    this._voices = new Set(); // live one-shot voices, for the cap
+    this._windLevelAt = 0;  // last time the world drove setWindLevel
   }
 
   // Must be called from a user gesture (button click / controller select).
@@ -78,9 +89,20 @@ export class AudioEngine {
     this.convolver = ctx.createConvolver();
     this.convolver.buffer = renderDesertIR(ctx);
     this.wet = ctx.createGain();
-    this.wet.gain.value = 0.9;
+    // 1.5, not the old 0.9: the per-voice send now taps PRE-panner (see
+    // play()) with a 0.6 floor on its distance curve, so anything inside
+    // its refDistance sees 0.6 x 1.5 = the old 0.9 exactly — the close
+    // mix is unchanged, only the far field gains its missing slapback.
+    this.wet.gain.value = 1.5;
     this.convolver.connect(this.wet);
     this.wet.connect(this.master);
+
+    // ambience bus: the wind bed hangs off one gain so the show can duck
+    // it under the gold wall without touching the master or the bed's own
+    // wind-level automation (the two multiply; the duck wins audibly)
+    this.amb = ctx.createGain();
+    this.amb.gain.value = 1;
+    this.amb.connect(this.master);
 
     // Real explosion bodies (CC0, assets/sounds/) — the dense chaotic mid
     // texture of a genuine blast that synthesis can't fake. Decoded at ctx
@@ -118,6 +140,8 @@ export class AudioEngine {
     variants('lift', 3, (s) => renderLift(ctx, s));
     variants('fuse', 2, (s) => renderFuseLoop(ctx, s));
     variants('fountain', 2, (s) => renderFountainLoop(ctx, s));
+    // pinwheel: the gain passed at play() is a pre-ramp placeholder —
+    // fireworks.js re-drives gain (~0.95 x spin power) and rate every frame
     variants('pinwheel', 2, (s) => renderPinwheelLoop(ctx, s));
     variants('shot', 4, (s) => renderShot(ctx, s));
     variants('firecrackers', 2, (s) => renderFirecrackerLoop(ctx, s));
@@ -129,13 +153,56 @@ export class AudioEngine {
     variants('wind', 1, (s) => renderWindLoop(ctx, s));
     variants('thud', 2, (s) => renderThud(ctx, s));
     variants('tick', 1, (s) => renderTick(ctx, s));
+    // prop foley bank — the interaction layer plays these by name through
+    // the same unknown-name-safe play() path
+    variants('rustle', 2, (s) => renderRustle(ctx, s));
+    variants('crunch', 2, (s) => renderCrunch(ctx, s));
+    variants('knock', 2, (s) => renderKnock(ctx, s));
+    variants('swing', 2, (s) => renderSwing(ctx, s));
+    variants('whistle', 3, (s) => renderWhistle(ctx, s));
+    variants('creak', 2, (s) => renderCreak(ctx, s));
     this.lib = lib;
 
     if (ctx.state === 'suspended') await ctx.resume();
     this.ready = true;
 
-    // ambience bed (non-positional, very quiet)
-    this.playFlat('wind', { gain: 0.08, loop: true });
+    // ambience bed (non-positional, very quiet); the world drives its
+    // level through setWindLevel — if it never does, gust on our own
+    this.windBed = this.playFlat('wind', { gain: 0.08, loop: true, bus: this.amb });
+    this._gust = 0.4;
+    this._gustTimer = setInterval(() => {
+      if (Date.now() - this._windLevelAt < 6000) return; // world is driving
+      this._gust = clamp(this._gust + (Math.random() * 2 - 1) * 0.35, 0, 1);
+      this._setWindGain(this._gust, 1.4);
+    }, 2600);
+  }
+
+  /**
+   * Wind gust level, 0..1 (the world calls this from its gust scalar).
+   * Maps onto the bed's gain between ~0.04 and ~0.14, always through
+   * setTargetAtTime so a gust can never click. Scene 6's duckAmbience()
+   * multiplies downstream on the ambience bus, so during the finale the
+   * duck takes precedence over whatever the weather is doing.
+   */
+  setWindLevel(level) {
+    this._windLevelAt = Date.now();
+    this._setWindGain(level, 0.6);
+  }
+
+  _setWindGain(level, tau) {
+    if (!this.windBed) return;
+    const g = 0.04 + clamp(level, 0, 1) * 0.10;
+    this.windBed.gainNode.gain.setTargetAtTime(g, this.ctx.currentTime, tau);
+  }
+
+  /** Duck the ambience bus ~5 dB for `seconds`, smooth both ways; the
+   *  release is pre-scheduled on the context clock so a suspended context
+   *  resumes it in the right place. The show fires this at the gold wall. */
+  duckAmbience(seconds = 12, depth = 0.56) {
+    if (!this.amb) return;
+    const t = this.ctx.currentTime;
+    this.amb.gain.setTargetAtTime(depth, t, 0.6);
+    this.amb.gain.setTargetAtTime(1, t + seconds, 2.0);
   }
 
   resume() {
@@ -193,19 +260,51 @@ export class AudioEngine {
   _buffer(name) {
     const arr = this.lib[name];
     if (!arr || !arr.length) return null; // unknown sample: caller no-ops
-    return arr[(Math.random() * arr.length) | 0];
+    if (arr.length === 1) return arr[0];
+    // shuffle bag: draw without replacement — a uniform pick over 3
+    // variants repeats itself immediately ~30% of the time, and the ear
+    // catches a doubled boom instantly
+    let bag = this._bags[name];
+    if (!bag || !bag.length) bag = this._bags[name] = arr.map((_, i) => i);
+    let k = (Math.random() * bag.length) | 0;
+    // a freshly refilled bag may still lead with the previous draw
+    if (bag.length === arr.length && bag[k] === this._lastVariant[name]) {
+      k = (k + 1) % bag.length;
+    }
+    const idx = bag.splice(k, 1)[0];
+    this._lastVariant[name] = idx;
+    return arr[idx];
   }
 
   /**
    * Play a sample at a world position.
    * opts: gain, rate, loop, send (reverb send 0..1), delayBySound (bool),
-   *       refDistance, hf (extra lowpass for distance haze)
+   *       refDistance, lowpass (distance haze), startDelay (extra seconds
+   *       on the context clock — survives suspend, unlike setTimeout),
+   *       priority (voice-cap rank, defaults to gain)
    */
   play(name, position, opts = {}) {
     if (!this.ready) return null;
     const buf = this._buffer(name);
     if (!buf) return null;
     const ctx = this.ctx;
+    const dist = this.listenerPos.distanceTo(position);
+
+    // voice cap: past VOICE_CAP live one-shots, refuse the quietest
+    // newcomers instead of letting the brick-wall limiter apologize for
+    // the pileup. Loops are exempt — they are few, persistent beds.
+    let voice = null;
+    if (!opts.loop) {
+      const pri = opts.priority ?? opts.gain ?? 1;
+      if (this._voices.size >= VOICE_CAP) {
+        let min = Infinity;
+        for (const v of this._voices) if (v.pri < min) min = v.pri;
+        if (pri <= min) return null;
+      }
+      voice = { pri };
+      this._voices.add(voice);
+    }
+
     const src = ctx.createBufferSource();
     src.buffer = buf;
     src.loop = !!opts.loop;
@@ -239,16 +338,25 @@ export class AudioEngine {
     gain.connect(panner);
     panner.connect(this.master);
 
+    // Reverb send taps PRE-panner. Post-panner the wet rode the panner's
+    // rolloff — distant shells got LESS reverb than near ones (backwards)
+    // and the wet image collapsed onto the dry pan instead of staying a
+    // diffuse field. The explicit curve replaces the rolloff: flat inside
+    // ~21 m, growing to 2.6x by ~90 m — dry falls with distance, wet
+    // holds, so the far field turns mostly-echo the way a real valley
+    // does. The short pre-delay is the extra wall-path: farther shells'
+    // mesa slapback lags more (distance at spawn; good enough — nothing
+    // audible moves 30 m mid-sample).
     const send = ctx.createGain();
-    send.gain.value = opts.send ?? 0.25;
-    panner.connect(send);
-    send.connect(this.convolver);
+    send.gain.value = (opts.send ?? 0.25) * clamp(dist / 35, 0.6, 2.6);
+    const pre = ctx.createDelay(0.4);
+    pre.delayTime.value = Math.min(0.35, (dist / SPEED_OF_SOUND) * 0.15);
+    gain.connect(send);
+    send.connect(pre);
+    pre.connect(this.convolver);
 
-    let when = ctx.currentTime;
-    if (opts.delayBySound) {
-      const dist = this.listenerPos.distanceTo(position);
-      when += dist / SPEED_OF_SOUND;
-    }
+    let when = ctx.currentTime + (opts.startDelay ?? 0);
+    if (opts.delayBySound) when += dist / SPEED_OF_SOUND;
     src.start(when);
 
     const handle = {
@@ -280,8 +388,9 @@ export class AudioEngine {
       },
     };
     src.onended = () => {
+      if (voice) this._voices.delete(voice);
       try {
-        gain.disconnect(); panner.disconnect(); send.disconnect();
+        gain.disconnect(); panner.disconnect(); send.disconnect(); pre.disconnect();
       } catch { /* noop */ }
     };
     return handle;
@@ -300,10 +409,11 @@ export class AudioEngine {
     const gain = ctx.createGain();
     gain.gain.value = opts.gain ?? 1;
     src.connect(gain);
-    gain.connect(this.master);
+    gain.connect(opts.bus ?? this.master);
     src.start();
     return {
       source: src,
+      gainNode: gain,
       stop(fade = 0.1) {
         try {
           gain.gain.setTargetAtTime(0, ctx.currentTime, fade / 3);
@@ -335,21 +445,21 @@ export class AudioEngine {
       refDistance: 12,
       lowpass: lowpass || undefined,
     });
+    // tails ride the CONTEXT clock (startDelay -> src.start(when)), not
+    // setTimeout: they can't drift under main-thread load, and a suspend
+    // freezes them in place instead of banking wall-clock callbacks that
+    // all blare into the resumed context later
     if (crackle) {
-      setTimeout(() => {
-        this.play('crackle', position, {
-          gain: 1.4, rate: 0.95 + Math.random() * 0.1,
-          send: 0.4, delayBySound: true, refDistance: 10,
-        });
-      }, 120);
+      this.play('crackle', position, {
+        gain: 1.4, rate: 0.95 + Math.random() * 0.1,
+        send: 0.4, delayBySound: true, refDistance: 10, startDelay: 0.12,
+      });
     } else if (size > 0.7) {
       // big shells leave a faint sizzle of burning stars after the report
-      setTimeout(() => {
-        this.play('crackle', position, {
-          gain: 0.45, rate: 0.78 + Math.random() * 0.08,
-          send: 0.35, delayBySound: true, refDistance: 10,
-        });
-      }, 250);
+      this.play('crackle', position, {
+        gain: 0.45, rate: 0.78 + Math.random() * 0.08,
+        send: 0.35, delayBySound: true, refDistance: 10, startDelay: 0.25,
+      });
     }
   }
 }
