@@ -109,11 +109,44 @@ Master GainNode (0.85)
   → Lowshelf filter (110 Hz, +4.5 dB)   ← adds "chest" sub-bass weight
   → DynamicsCompressor (threshold -12dB, knee 24, ratio 3.5,
                          attack 6ms, release 300ms)
+  → peak compressor (threshold -2dB, knee 0, ratio 20,
+                     attack 1ms, release 120ms)
+  → gain 0.5 → WaveShaper (identity through 0.8, soft knee to ±0.98)
   → destination
 ```
 
-The compressor is what lets many simultaneous booms during a finale glue
-together without clipping or fighting each other.
+The compressors shape the mix, but their finite ratios and attacks cannot
+guarantee a peak ceiling. The last waveshaper bounds the output below full
+scale, including transient overshoots. It uses no oversampling, so there is
+no post-shaping interpolation overshoot. The preceding gain maps a ±2 input
+range into the curve; values outside that range clamp to its endpoints.
+
+## Resource budget (separate from output volume)
+
+`AUDIO_LIMITS` in `src/audio.js` enforces a global maximum of **24 allocated
+playback graphs**, including scheduled starts, positional and flat sounds,
+loops, and fading sounds. No playback path is exempt. There are at most
+8 loops and 2 HRTF panners; additional spatial sounds use equalpower.
+
+Ordinary one-shots start yielding at 20 voices. An aged, quieter one-shot
+can fade over 20ms to admit a stronger report within the remaining headroom.
+It retains its slot until the real `ended` event disconnects every per-voice
+node. At 24 allocations, new requests are refused before allocating nodes.
+Reports keep their first 120ms; optional crackle/sizzle tails are suppressed
+from 12 allocations onward and never play if their parent report was refused.
+Loops cannot be stolen, so their owners never retain a silently evicted handle.
+
+The context requests 60ms latency for mobile callback headroom. Browsers may
+ignore this hint, so correctness does not depend on it. This is not an assumed
+Quest CPU threshold: on-device profiling/listening still validates whether
+these conservative limits leave enough processing time on a particular device.
+
+`npm test` independently counts allocated sources under repeated overload,
+including pending fade-outs. `npm run test:audio:browser` audits real browser
+nodes, runs the full show with sandbox emitters and the Colossus, and scans
+the resulting stereo waveform for non-finite samples and ceiling violations.
+The test uses actual physics and ended callbacks, not a copied cue schedule
+or a reimplementation of the admission policy.
 
 ## Condensed version, for briefing another LLM/coding assistant
 

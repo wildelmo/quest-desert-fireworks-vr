@@ -2029,6 +2029,7 @@ export class FireworksSystem {
   }
 
   _recedeWhoosh(whoosh) {
+    if (!whoosh) return; // the global audio budget may refuse a voice
     const pr = whoosh.source.playbackRate;
     const t0 = this.audio.ctx.currentTime;
     pr.setValueAtTime(pr.value, t0);

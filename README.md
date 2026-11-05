@@ -209,8 +209,19 @@ To audition any recipe without a headset: `node tools/render-sounds.mjs out whoo
 ```sh
 npm install        # dev deps only (three for vendoring, playwright-core for QA)
 npm start          # http://localhost:8080
+npm test           # audio allocation and lifecycle regression tests
+npm run test:audio:browser # real Web Audio stress + entire show/sandbox audio render
 node tools/screenshot.mjs shots   # headless smoke test + screenshots
 ```
+
+The audio browser test starts its own local server and uses installed Chrome/Edge,
+`CHROMIUM_PATH`, or Playwright's Chromium. It runs the actual show, fireworks,
+ambient audio, and Colossus with the live admission policy enabled. It checks
+independently counted source allocations, cleanup, report coverage throughout
+the show, and the rendered output ceiling. Offline rendering verifies signal
+and resource bounds; listening on the Quest is still needed to validate device
+performance. In a browser console, `window.__app.audio.getDiagnostics()` reports
+current/peak allocations, refusals, fades, HRTF usage, and actual audio latency.
 
 MIT licensed. Nearly all art and audio are procedural; the exceptions are credited in
 [`assets/textures/README.md`](assets/textures/README.md) (sky and moon imagery, and the

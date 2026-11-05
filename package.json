@@ -4,6 +4,8 @@
   "description": "A WebXR fireworks sandbox for Meta Quest 3: a desert at night, an endless crate of fireworks, and very big booms.",
   "type": "module",
   "scripts": {
+    "test": "node --test tools/audio-budget.test.mjs",
+    "test:audio:browser": "node tools/audio-browser-test.mjs",
     "start": "node tools/serve.mjs",
     "start:https": "node tools/serve.mjs --https"
   },

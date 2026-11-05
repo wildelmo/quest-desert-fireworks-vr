@@ -1,4 +1,4 @@
-// Positional audio engine. Uses raw Web Audio (HRTF panners) rather than
+// Positional audio engine. Uses raw Web Audio rather than
 // three.js audio so we can do things three doesn't: true speed-of-sound
 // propagation delay (a shell bursting 150 m up arrives ~0.44 s late), a
 // shared convolver carrying a synthesized "open desert with distant rock"
@@ -18,10 +18,20 @@ import {
 
 const SPEED_OF_SOUND = 340;
 
-// live one-shot voices allowed before new low-priority plays are refused —
-// beyond this the belt/finale pileups were only "surviving" because the
-// brick-wall limiter apologized for them
-const VOICE_CAP = 48;
+// Resource limits, not a per-second show budget. EVERY allocated playback
+// graph counts, including delayed starts, loops, flat audio and fade-outs.
+// Leave headroom between ordinary traffic and the absolute ceiling so an
+// old rumble can fade while a fresh report starts. At the ceiling, refuse
+// BEFORE allocating nodes; a fading voice is never a free slot.
+export const AUDIO_LIMITS = Object.freeze({
+  voices: 24,
+  steadyVoices: 20,
+  decorativeVoices: 12,
+  loops: 8,
+  hrtf: 2,
+});
+
+const finitePosition = (p) => p && [p.x, p.y, p.z].every(Number.isFinite);
 
 export class AudioEngine {
   constructor() {
@@ -34,7 +44,8 @@ export class AudioEngine {
     this.listenerPos = new THREE.Vector3(0, 1.6, 0);
     this._bags = {};        // per-sample shuffle bags (no immediate repeats)
     this._lastVariant = {};
-    this._voices = new Set(); // live one-shot voices, for the cap
+    this._voices = new Set();
+    this._audioStats = { peakVoices: 0, peakLoops: 0, peakHrtf: 0, admitted: 0, refused: 0, retired: 0 };
     this._windLevelAt = 0;  // last time the world drove setWindLevel
   }
 
@@ -42,7 +53,9 @@ export class AudioEngine {
   async init() {
     if (this.ctx) return;
     const ctx = new (window.AudioContext || window.webkitAudioContext)({
-      latencyHint: 'interactive',
+      // Request some callback slack on mobile. This is only a hint: the
+      // hard resource limits hold even when the browser ignores it.
+      latencyHint: 0.06,
     });
     this.ctx = ctx;
 
@@ -66,13 +79,8 @@ export class AudioEngine {
     this.comp.attack.value = 0.006;
     this.comp.release.value = 0.30;
 
-    // Brick-wall safety limiter, the last node before the DAC. The glue
-    // comp above shapes the mix but at ratio 3.5 a thirty-salute finale
-    // pileup still sums far past 0 dBFS and the browser output hard-clips —
-    // the "staticky breakup" at the end of the show. Ratio 20 / zero knee /
-    // 1 ms attack is transparent below -2 dB and simply refuses to clip
-    // above it. The samples themselves are untouched: this is mastering,
-    // the same brick-wall every real broadcast chain ends in.
+    // Peak compression. A finite ratio and nonzero attack do NOT guarantee
+    // a ceiling; the final waveshaper below catches transient overshoots.
     this.limiter = ctx.createDynamicsCompressor();
     this.limiter.threshold.value = -2;
     this.limiter.knee.value = 0;
@@ -80,10 +88,24 @@ export class AudioEngine {
     this.limiter.attack.value = 0.001;
     this.limiter.release.value = 0.12;
 
+    this.clipIn = ctx.createGain();
+    this.clipIn.gain.value = 0.5;
+    this.clip = ctx.createWaveShaper();
+    const curve = new Float32Array(4097);
+    for (let i = 0; i < curve.length; i++) {
+      const x = 4 * i / (curve.length - 1) - 2;
+      const a = Math.abs(x);
+      curve[i] = Math.sign(x) * (a <= 0.8 ? a : 0.8 + 0.18 * Math.tanh((a - 0.8) / 0.18));
+    }
+    this.clip.curve = curve;
+    this.clip.oversample = 'none';
+
     this.master.connect(this.shelf);
     this.shelf.connect(this.comp);
     this.comp.connect(this.limiter);
-    this.limiter.connect(ctx.destination);
+    this.limiter.connect(this.clipIn);
+    this.clipIn.connect(this.clip);
+    this.clip.connect(ctx.destination);
 
     // shared desert reverb
     this.convolver = ctx.createConvolver();
@@ -276,158 +298,191 @@ export class AudioEngine {
     return arr[idx];
   }
 
-  /**
-   * Play a sample at a world position.
-   * opts: gain, rate, loop, send (reverb send 0..1), delayBySound (bool),
-   *       refDistance, lowpass (distance haze), startDelay (extra seconds
-   *       on the context clock — survives suspend, unlike setTimeout),
-   *       priority (voice-cap rank, defaults to gain)
-   */
-  play(name, position, opts = {}) {
-    if (!this.ready) return null;
-    const buf = this._buffer(name);
-    if (!buf) return null;
-    const ctx = this.ctx;
-    const dist = this.listenerPos.distanceTo(position);
-    const ref = opts.refDistance ?? 4;
-
-    // voice cap: past VOICE_CAP live one-shots, refuse the quietest
-    // newcomers instead of letting the brick-wall limiter apologize for
-    // the pileup. Loops are exempt — they are few, persistent beds.
-    let voice = null;
-    if (!opts.loop) {
-      const pri = opts.priority ?? opts.gain ?? 1;
-      if (this._voices.size >= VOICE_CAP) {
-        let min = Infinity;
-        for (const v of this._voices) if (v.pri < min) min = v.pri;
-        if (pri <= min) return null;
-      }
-      voice = { pri };
-      this._voices.add(voice);
-    }
-
-    const src = ctx.createBufferSource();
-    src.buffer = buf;
-    src.loop = !!opts.loop;
-    src.playbackRate.value = opts.rate ?? 1;
-
-    const panner = ctx.createPanner();
-    // HRTF is per-sample convolution — reserve it for close, persistent
-    // sources (fuse, torch, fountains); one-shot booms during a finale can
-    // pile up 20+ voices and equalpower is indistinguishable at range.
-    panner.panningModel = opts.hrtf ? 'HRTF' : 'equalpower';
-    panner.distanceModel = 'inverse';
-    panner.refDistance = ref;
-    panner.rolloffFactor = 1;
-    panner.positionX.value = position.x;
-    panner.positionY.value = position.y;
-    panner.positionZ.value = position.z;
-
-    const gain = ctx.createGain();
-    gain.gain.value = opts.gain ?? 1;
-
-    let head = src;
-    let lpNode = null;
-    if (opts.lowpass) {
-      lpNode = ctx.createBiquadFilter();
-      lpNode.type = 'lowpass';
-      lpNode.frequency.value = opts.lowpass;
-      head.connect(lpNode);
-      head = lpNode;
-    }
-    head.connect(gain);
-    gain.connect(panner);
-    panner.connect(this.master);
-
-    // Reverb send taps PRE-panner. Post-panner the wet/dry ratio stayed
-    // flat with distance — distant shells got no extra echo (backwards)
-    // and the wet image collapsed onto the dry pan instead of staying a
-    // diffuse field. The send now applies the panner's rolloff by hand
-    // (att — same inverse model, so absolute wet still decays) TIMES a
-    // growth curve: flat inside ~21 m, up 2.6x by ~90 m. Net: wet falls
-    // ~13 dB slower than dry, and a 100 m break is mostly mesa answer
-    // the way a real valley break is. (Measured: dropping att entirely
-    // put the far-field wet +30 dB over the tuned mix and pinned the
-    // limiter — the growth curve must ride the rolloff, not replace it.)
-    // The short pre-delay is the extra wall-path: farther shells'
-    // slapback lags more (distance at spawn; good enough — nothing
-    // audible moves 30 m mid-sample).
-    const att = ref / Math.max(dist, ref);
-    const send = ctx.createGain();
-    send.gain.value = (opts.send ?? 0.25) * att * clamp(dist / 35, 0.6, 2.6);
-    const pre = ctx.createDelay(0.4);
-    pre.delayTime.value = Math.min(0.35, (dist / SPEED_OF_SOUND) * 0.15);
-    gain.connect(send);
-    send.connect(pre);
-    pre.connect(this.convolver);
-
-    let when = ctx.currentTime + (opts.startDelay ?? 0);
-    if (opts.delayBySound) when += dist / SPEED_OF_SOUND;
-    src.start(when);
-
-    const handle = {
-      source: src,
-      gainNode: gain,
-      panner,
-      stop(fade = 0.05) {
-        try {
-          gain.gain.setTargetAtTime(0, ctx.currentTime, fade / 3);
-          src.stop(ctx.currentTime + fade + 0.1);
-        } catch { /* already stopped */ }
-      },
-      setPosition(p) {
-        const t = ctx.currentTime;
-        panner.positionX.setTargetAtTime(p.x, t, 0.03);
-        panner.positionY.setTargetAtTime(p.y, t, 0.03);
-        panner.positionZ.setTargetAtTime(p.z, t, 0.03);
-      },
-      setGain(v) {
-        gain.gain.setTargetAtTime(v, ctx.currentTime, 0.03);
-      },
-      setRate(v) {
-        src.playbackRate.setTargetAtTime(v, ctx.currentTime, 0.08);
-      },
-      // only live when the sound was started with a lowpass — long-lived
-      // loops (the colossus roar) re-tilt as the listener walks nearer
-      setLowpass(v) {
-        lpNode?.frequency.setTargetAtTime(v, ctx.currentTime, 0.15);
-      },
+  /** Snapshot for headset debugging; counts include scheduled and fading voices. */
+  getDiagnostics() {
+    const live = [...this._voices];
+    return {
+      limits: AUDIO_LIMITS,
+      voices: live.length,
+      loops: live.filter((v) => v.loop).length,
+      hrtf: live.filter((v) => v.hrtf).length,
+      fading: live.filter((v) => v.stopping).length,
+      scheduled: live.filter((v) => v.when > this.ctx.currentTime).length,
+      ...this._audioStats,
+      baseLatency: this.ctx?.baseLatency ?? null,
+      outputLatency: this.ctx?.outputLatency ?? null,
     };
-    src.onended = () => {
-      if (voice) this._voices.delete(voice);
-      try {
-        gain.disconnect(); panner.disconnect(); send.disconnect(); pre.disconnect();
-      } catch { /* noop */ }
-    };
-    return handle;
   }
 
-  // Non-positional (ambience / UI)
+  _reserveVoice(opts, attenuation) {
+    const loop = !!opts.loop;
+    const live = [...this._voices];
+    const refuse = () => { this._audioStats.refused++; return null; };
+    if (loop && live.filter((v) => v.loop).length >= AUDIO_LIMITS.loops) return refuse();
+    if (opts.decorative && live.length >= AUDIO_LIMITS.decorativeVoices) return refuse();
+    // Never fade an existing sound on behalf of a request we cannot admit.
+    if (live.length >= AUDIO_LIMITS.voices) return refuse();
+    const pri = (opts.priority ?? opts.gain ?? 1) * attenuation;
+    if (live.length >= AUDIO_LIMITS.steadyVoices) {
+      const now = this.ctx.currentTime;
+      let worst = null;
+      let score = Infinity;
+      for (const v of live) {
+        // Keep loops under their own limit, and preserve each report's
+        // attack. Scheduled sounds haven't aged into expendable tails.
+        if (v.loop || v.stopping || now < v.when + 0.12) continue;
+        const rank = v.pri * Math.exp(-(now - v.when) / 1.0);
+        if (rank < score) { score = rank; worst = v; }
+      }
+      if (worst && (loop || score < pri)) {
+        worst.stop(0.02);
+        this._audioStats.retired++;
+      } else if (!loop) {
+        return refuse();
+      }
+    }
+    // Retiring above does not free anything! Wait for onended and node
+    // disconnection before reusing that slot, even during a same-tick flood.
+    const hrtf = !!opts.hrtf && live.filter((v) => v.hrtf).length < AUDIO_LIMITS.hrtf;
+    const voice = { pri, loop, hrtf, stopping: false, nodes: [] };
+    this._voices.add(voice);
+    return voice;
+  }
+
+  _finishVoice(voice) {
+    if (!this._voices.has(voice)) return;
+    // Disconnect the source AND optional lowpass, not just downstream
+    // gains. A slot represents the complete graph until this point.
+    for (const node of voice.nodes) node.disconnect();
+    this._voices.delete(voice);
+  }
+
+  /**
+   * Positional sample. All playback paths share _play's admission gate.
+   * opts: gain, rate, loop, send, delayBySound, refDistance, lowpass,
+   * startDelay, priority, hrtf, decorative (sacrificed first under load).
+   */
+  play(name, position, opts = {}) {
+    if (!finitePosition(position)) return null;
+    return this._play(name, position, opts);
+  }
+
+  // Ambience and UI obey exactly the same resource ceiling as fireworks.
   playFlat(name, opts = {}) {
+    return this._play(name, null, opts);
+  }
+
+  _play(name, position, opts) {
     if (!this.ready) return null;
     const buf = this._buffer(name);
     if (!buf) return null;
     const ctx = this.ctx;
-    const src = ctx.createBufferSource();
-    src.buffer = buf;
-    src.loop = !!opts.loop;
-    src.playbackRate.value = opts.rate ?? 1;
-    const gain = ctx.createGain();
-    gain.gain.value = opts.gain ?? 1;
-    src.connect(gain);
-    gain.connect(opts.bus ?? this.master);
-    src.start();
-    return {
-      source: src,
-      gainNode: gain,
-      stop(fade = 0.1) {
-        try {
-          gain.gain.setTargetAtTime(0, ctx.currentTime, fade / 3);
-          src.stop(ctx.currentTime + fade + 0.1);
-        } catch { /* already stopped */ }
-      },
-      setGain(v) { gain.gain.setTargetAtTime(v, ctx.currentTime, 0.05); },
-    };
+    const level = opts.gain ?? 1;
+    const rate = opts.rate ?? 1;
+    const ref = opts.refDistance ?? 4;
+    const delay = opts.startDelay ?? 0;
+    const sendLevel = opts.send ?? 0.25;
+    if (![level, rate, ref, delay, sendLevel, opts.priority ?? 1, opts.lowpass ?? 0].every(Number.isFinite)
+      || level < 0 || rate <= 0 || ref <= 0 || delay < 0 || sendLevel < 0
+      || (opts.lowpass ?? 0) < 0 || !finitePosition(this.listenerPos)) return null;
+    const dist = position ? this.listenerPos.distanceTo(position) : 0;
+    if (!Number.isFinite(dist)) return null;
+    const att = ref / Math.max(dist, ref);
+    const voice = this._reserveVoice(position ? opts : { ...opts, hrtf: false }, att);
+    if (!voice) return null;
+    const own = (node) => { voice.nodes.push(node); return node; };
+    try {
+      const src = own(ctx.createBufferSource());
+      src.buffer = buf;
+      src.loop = voice.loop;
+      src.playbackRate.value = rate;
+      const gain = own(ctx.createGain());
+      gain.gain.value = level;
+      let head = src;
+      let lpNode = null;
+      if (opts.lowpass) {
+        lpNode = own(ctx.createBiquadFilter());
+        lpNode.type = 'lowpass';
+        lpNode.frequency.value = Math.min(opts.lowpass, ctx.sampleRate / 2);
+        head.connect(lpNode);
+        head = lpNode;
+      }
+      head.connect(gain);
+      let panner = null;
+      if (position) {
+        panner = own(ctx.createPanner());
+        panner.panningModel = voice.hrtf ? 'HRTF' : 'equalpower';
+        panner.distanceModel = 'inverse';
+        panner.refDistance = ref;
+        panner.rolloffFactor = 1;
+        panner.positionX.value = position.x;
+        panner.positionY.value = position.y;
+        panner.positionZ.value = position.z;
+        gain.connect(panner);
+        panner.connect(this.master);
+        if (sendLevel > 0) {
+          // Pre-panner reverb: retain the distance attenuation while
+          // letting far shells arrive wetter. Only one shared convolver.
+          const send = own(ctx.createGain());
+          send.gain.value = sendLevel * att * clamp(dist / 35, 0.6, 2.6);
+          const pre = own(ctx.createDelay(0.4));
+          pre.delayTime.value = Math.min(0.35, dist / SPEED_OF_SOUND * 0.15);
+          gain.connect(send);
+          send.connect(pre);
+          pre.connect(this.convolver);
+        }
+      } else {
+        gain.connect(opts.bus ?? this.master);
+      }
+      voice.when = ctx.currentTime + delay + (position && opts.delayBySound ? dist / SPEED_OF_SOUND : 0);
+      const stop = (fade = 0.05) => {
+        if (voice.stopping || !this._voices.has(voice)) return;
+        voice.stopping = true;
+        const t = ctx.currentTime;
+        const duration = Number.isFinite(fade) ? clamp(fade, 0.005, 2) : 0.05;
+        if (gain.gain.cancelAndHoldAtTime) gain.gain.cancelAndHoldAtTime(t);
+        else { gain.gain.cancelScheduledValues(t); gain.gain.setValueAtTime(gain.gain.value, t); }
+        gain.gain.linearRampToValueAtTime(0, t + duration);
+        src.stop(voice.when > t ? t : t + duration);
+      };
+      voice.stop = stop;
+      const alive = () => !voice.stopping && this._voices.has(voice);
+      const handle = {
+        source: src, gainNode: gain, panner, stop,
+        get ended() { return !alive(); },
+        setPosition: (p) => {
+          if (!alive() || !panner || !finitePosition(p)) return;
+          const t = ctx.currentTime;
+          panner.positionX.setTargetAtTime(p.x, t, 0.03);
+          panner.positionY.setTargetAtTime(p.y, t, 0.03);
+          panner.positionZ.setTargetAtTime(p.z, t, 0.03);
+        },
+        setGain: (v) => {
+          if (alive() && Number.isFinite(v) && v >= 0) gain.gain.setTargetAtTime(v, ctx.currentTime, 0.03);
+        },
+        setRate: (v) => {
+          if (alive() && Number.isFinite(v) && v > 0) src.playbackRate.setTargetAtTime(v, ctx.currentTime, 0.08);
+        },
+        setLowpass: (v) => {
+          if (alive() && lpNode && Number.isFinite(v) && v > 0) {
+            lpNode.frequency.setTargetAtTime(Math.min(v, ctx.sampleRate / 2), ctx.currentTime, 0.15);
+          }
+        },
+      };
+      src.onended = () => this._finishVoice(voice);
+      src.start(voice.when);
+      this._audioStats.admitted++;
+      const live = [...this._voices];
+      this._audioStats.peakVoices = Math.max(this._audioStats.peakVoices, live.length);
+      this._audioStats.peakLoops = Math.max(this._audioStats.peakLoops, live.filter((v) => v.loop).length);
+      this._audioStats.peakHrtf = Math.max(this._audioStats.peakHrtf, live.filter((v) => v.hrtf).length);
+      return handle;
+    } catch (err) {
+      this._finishVoice(voice);
+      this._audioStats.refused++;
+      console.warn('Audio voice could not start', err);
+      return null;
+    }
   }
 
   /**
@@ -436,12 +491,12 @@ export class AudioEngine {
    * and a crackle tail when requested.
    */
   boom(position, size = 1, { crackle = false } = {}) {
-    if (!this.ready) return;
+    if (!this.ready || !finitePosition(position) || !Number.isFinite(size)) return;
     const name = size > 0.75 ? 'boomBig' : size > 0.45 ? 'boomMed' : 'boomSmall';
     const dist = this.listenerPos.distanceTo(position);
     // very distant booms lose their highs
     const lowpass = dist > 80 ? Math.max(900, 8000 - (dist - 80) * 40) : 0;
-    this.play(name, position, {
+    const report = this.play(name, position, {
       gain: 3.0 * (0.7 + size * 0.6),
       // depth is baked into the samples now; keep rate variation tight so
       // slowing the buffer doesn't smear the report's attack into mush
@@ -451,18 +506,21 @@ export class AudioEngine {
       refDistance: 12,
       lowpass: lowpass || undefined,
     });
+    if (!report) return;
     // tails ride the CONTEXT clock (startDelay -> src.start(when)), not
     // setTimeout: they can't drift under main-thread load, and a suspend
     // freezes them in place instead of banking wall-clock callbacks that
     // all blare into the resumed context later
     if (crackle) {
       this.play('crackle', position, {
+        decorative: true, priority: 0.4,
         gain: 1.4, rate: 0.95 + Math.random() * 0.1,
         send: 0.4, delayBySound: true, refDistance: 10, startDelay: 0.12,
       });
     } else if (size > 0.7) {
       // big shells leave a faint sizzle of burning stars after the report
       this.play('crackle', position, {
+        decorative: true, priority: 0.1,
         gain: 0.45, rate: 0.78 + Math.random() * 0.08,
         send: 0.35, delayBySound: true, refDistance: 10, startDelay: 0.25,
       });
