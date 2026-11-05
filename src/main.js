@@ -12,6 +12,7 @@ import { COLOSSUS_POS } from './colossus.js';
 import { Interactions, XRHand, DesktopControls } from './input.js';
 import { WIND } from './wind.js';
 import { randRange, randPick, clamp } from './utils.js';
+import { FrameMetrics } from './frame-metrics.js';
 
 const params = new URLSearchParams(location.search);
 
@@ -22,12 +23,17 @@ const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'hi
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.xr.enabled = true;
+// Reserve GPU headroom for tracking and held objects: 0.9 per dimension
+// shades 19% fewer XR pixels. This does not change desktop resolution.
+// ?xrScale=1 opts back into native eye-buffer resolution.
+const xrScale = parseFloat(params.get('xrScale'));
+renderer.xr.setFramebufferScaleFactor(Number.isFinite(xrScale) ? clamp(xrScale, 0.6, 1.2) : 0.9);
 // fixed foveated rendering OFF by default (three.js defaults it to 1.0):
 // FFR's screen-fixed tile boundaries are glaring on this content — thin
 // bright lattice and soft glows on near-black sky — showing up as a dark
 // seam that sweeps the Colossus when you tilt your head, and a vertical
-// resolution step at the lens edge. The scene is cheap enough to render
-// the periphery at full res; ?foveation=0..1 opts back in on weak GPUs.
+// resolution step at the lens edge. Use uniform resolution scaling above
+// for headroom; ?foveation=0..1 opts back in if desired.
 const foveation = parseFloat(params.get('foveation'));
 renderer.xr.setFoveation(Number.isFinite(foveation) ? clamp(foveation, 0, 1) : 0);
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -39,6 +45,15 @@ if (params.get('shadows') !== '0') {
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 }
+// Dynamic shadow maps cost an extra scene pass and per-pixel filtering.
+// Keep them on desktop; immersive VR prioritizes steady frame delivery.
+// Moonlight and burst lighting remain. ?shadows=1 explicitly restores them.
+renderer.xr.addEventListener('sessionstart', () => {
+  renderer.shadowMap.enabled = params.get('shadows') === '1';
+});
+renderer.xr.addEventListener('sessionend', () => {
+  renderer.shadowMap.enabled = params.get('shadows') !== '0';
+});
 document.body.appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
@@ -287,6 +302,15 @@ if (params.get('autostart') === 'desktop' || params.get('demo')) {
 
 // expose for tests / tinkering
 window.__app = { scene, camera, player, renderer, fireworks, world, audio, pool, interactions, WIND, THREE };
+const frameMetrics = new FrameMetrics();
+window.__app.getPerformance = () => ({
+  ...frameMetrics.snapshot(renderer.xr.getSession()?.frameRate),
+  drawCalls: renderer.info.render.calls,
+  particleSlotsSubmitted: pool.points.geometry.drawRange.count,
+  particleCapacity: pool.capacity,
+  xrScale: Number.isFinite(xrScale) ? clamp(xrScale, 0.6, 1.2) : 0.9,
+  shadows: renderer.shadowMap.enabled,
+});
 
 // the menu is up on load: let the desert perform behind it
 attractStart();
@@ -300,7 +324,8 @@ let time = 0;
 let floorOffset = 0;  // rig lift when the runtime lacks a floor reference
 let floorCheck = 0;   // countdown to the one-shot head-height sanity sample
 
-renderer.setAnimationLoop(() => {
+renderer.setAnimationLoop((timestamp) => {
+  const submissionStart = performance.now();
   const dt = Math.min(clock.getDelta(), 0.05);
   time += dt;
 
@@ -344,4 +369,5 @@ renderer.setAnimationLoop(() => {
   audio.updateListener(renderer.xr.isPresenting ? renderer.xr.getCamera() : camera);
 
   renderer.render(scene, camera);
+  frameMetrics.record(timestamp, performance.now() - submissionStart);
 });

@@ -1021,6 +1021,10 @@ export function createColossus(scene, fireworks, pool, audio) {
     // ---- per-pod fire: flares, sparks, smoke, embers ----
     const listener = audio.listenerPos;
     const camDist = listener.distanceTo(hubWorld);
+    // A far wheel occupies a small part of each eye. Keep its silhouette,
+    // rotation, lamps, salutes and audio, but stop paying close-up particle
+    // density from camp. Full density returns as the player approaches.
+    const particleDensity = clamp(100 / Math.max(camDist, 1), 0.2, 1);
     const rip = Math.min(omega, 1.4); // how hard the wheel is ripping
     for (let k = 0; k < N_PODS; k++) {
       const pod = pods[k];
@@ -1053,7 +1057,7 @@ export function createColossus(scene, fireworks, pool, audio) {
         // inherits the tip speed, so at kindle pace the spray combs into
         // long arcs that fall away beneath the wheel — and at full rip the
         // 60+ m/s tips fling them into a continuous shredding halo
-        pod.sparkAcc += 105 * pod.burn * (0.7 + 0.5 * podFlick) * (1 + 1.5 * rip) * dt;
+        pod.sparkAcc += 105 * pod.burn * (0.7 + 0.5 * podFlick) * (1 + 1.5 * rip) * dt * particleDensity;
         let cnt = pod.sparkAcc | 0;
         pod.sparkAcc -= cnt;
         if (cnt > 0) {
@@ -1077,7 +1081,7 @@ export function createColossus(scene, fireworks, pool, audio) {
         // its own gunpowder plume, drifting downwind and lit by its fire
         // (tangential shove capped: smoke sheds off the fast rim and hangs,
         // it doesn't fly with it)
-        pod.smokeAcc += 3.0 * pod.burn * dt;
+        pod.smokeAcc += 3.0 * pod.burn * dt * particleDensity;
         cnt = pod.smokeAcc | 0;
         pod.smokeAcc -= cnt;
         if (cnt > 0) {
@@ -1107,7 +1111,7 @@ export function createColossus(scene, fireworks, pool, audio) {
         pod.wasBottom = bottom;
       } else if (glow) {
         // dying coals drip off the cold pods
-        pod.emberAcc += 2.0 * pod.ember * dt;
+        pod.emberAcc += 2.0 * pod.ember * dt * particleDensity;
         let cnt = pod.emberAcc | 0;
         pod.emberAcc -= cnt;
         if (cnt > 0) {
@@ -1127,7 +1131,7 @@ export function createColossus(scene, fireworks, pool, audio) {
 
     // ---- the dust bank: a standing haze around the base so the monument
     // never sits in optically empty air (in-world atmosphere, not lens DoF)
-    dustAcc += 1.7 * dt;
+    dustAcc += 1.7 * dt * particleDensity;
     let dcnt = dustAcc | 0;
     dustAcc -= dcnt;
     if (dcnt > 0) {

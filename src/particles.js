@@ -44,6 +44,8 @@ const ATLAS_FILES = {
   [CELL.FLASH]: 'flare_01.png',
 };
 
+const DRAW_BLOCK = 256;
+
 function drawGaussian(g, cx, cy, r, hard = 0.25) {
   const grad = g.createRadialGradient(cx, cy, 0, cx, cy, r);
   grad.addColorStop(0.0, 'rgba(255,255,255,1)');
@@ -282,6 +284,10 @@ export class ParticlePool {
     this.groundHeight = groundHeight; // (x, z) => sand height, for settling
     this.cursor = 0;
     this.dirtyRuns = []; // contiguous [start, count] runs written this frame
+    // Conservative expiry per block: trim unused ends of the ring without
+    // scanning 96k particles or compacting/uploading an index buffer each frame.
+    // Future-born child effects count too, so trimming never loses them.
+    this._blockEnds = new Float64Array(Math.ceil(capacity / DRAW_BLOCK)).fill(-Infinity);
 
     // Ring-overflow debug counter (default OFF — the spawn hot path must
     // stay branch-cheap). When trackStomp is on, every spawn that lands on
@@ -316,6 +322,8 @@ export class ParticlePool {
     geo.setAttribute('aShape', this.aShape);
     geo.setAttribute('aGroundY', this.aGround);
     geo.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 10000);
+    geo.setDrawRange(0, 0);
+    for (const attr of Object.values(geo.attributes)) attr.setUsage(THREE.DynamicDrawUsage);
 
     this.atlas = makeAtlas();
     this.uniforms = {
@@ -431,10 +439,30 @@ export class ParticlePool {
       gy = Math.min(this.groundHeight(px + vx * k, pz + vz * k) + 0.02, py);
     }
     this.aGround.array[i] = gy;
+
+    const block = Math.floor(i / DRAW_BLOCK);
+    this._blockEnds[block] = Math.max(this._blockEnds[block], t[i * 2] + t[i * 2 + 1]);
+    if ((i + 1) % DRAW_BLOCK === 0 || i === this.capacity - 1) {
+      // A ring wrap can overwrite long-lived particles with shorter ones.
+      // Recompute only a completed block, amortizing the scan over writes.
+      let end = -Infinity;
+      for (let j = block * DRAW_BLOCK; j <= i; j++) end = Math.max(end, t[j * 2] + t[j * 2 + 1]);
+      this._blockEnds[block] = end;
+    }
   }
 
   update(time, drawingBufferWidth, drawingBufferHeight) {
     this.uniforms.uTime.value = time;
+    let first = -1, last = -1;
+    for (let b = 0; b < this._blockEnds.length; b++) {
+      if (this._blockEnds[b] > time) {
+        if (first < 0) first = b;
+        last = b;
+      }
+    }
+    const start = first < 0 ? 0 : first * DRAW_BLOCK;
+    const end = last < 0 ? 0 : Math.min(this.capacity, (last + 1) * DRAW_BLOCK);
+    this.points.geometry.setDrawRange(start, end - start);
     if (drawingBufferHeight) {
       this.uniforms.uRes.value.set(drawingBufferWidth || drawingBufferHeight, drawingBufferHeight);
     }

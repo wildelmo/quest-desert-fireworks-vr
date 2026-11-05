@@ -7,15 +7,18 @@
   <meta name="description" content="A WebXR fireworks sandbox for Meta Quest: a desert at night, an endless crate of fireworks, and very big booms.">
   <meta name="theme-color" content="#05060f">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎆</text></svg>">
-  <!-- bump ?v= together on each release: index.html then atomically pulls
-       matching assets instead of mixing fresh HTML with stale cached CSS/JS -->
-  <link rel="stylesheet" href="style.css?v=16">
+  <!-- Version the entry point and changed modules so an existing Quest tab
+       fetches this release instead of reusing cached implementation files. -->
+  <link rel="stylesheet" href="style.css?v=17">
   <script type="importmap">
     {
       "imports": {
         "three": "./lib/three.module.js",
         "./src/audio.js": "./src/audio.js?v=16",
-        "./src/fireworks.js": "./src/fireworks.js?v=16"
+        "./src/fireworks.js": "./src/fireworks.js?v=16",
+        "./src/particles.js": "./src/particles.js?v=17",
+        "./src/colossus.js": "./src/colossus.js?v=17",
+        "./src/frame-metrics.js": "./src/frame-metrics.js?v=17"
       }
     }
   </script>
@@ -62,6 +65,6 @@
   </div>
   <div id="reticle"></div>
   <div id="hud"></div>
-  <script type="module" src="src/main.js?v=16"></script>
+  <script type="module" src="src/main.js?v=17"></script>
 </body>
 </html>

@@ -22,3 +22,5 @@ jobs:
       - run: npm test
       - run: npx playwright-core install --with-deps chromium
       - run: npm run test:audio:browser
+      - name: Check rendering work and particle lifetimes
+        run: npm run test:performance

@@ -210,6 +210,7 @@ To audition any recipe without a headset: `node tools/render-sounds.mjs out whoo
 npm install        # dev deps only (three for vendoring, playwright-core for QA)
 npm start          # http://localhost:8080
 npm test           # audio allocation and lifecycle regression tests
+npm run test:performance # rendering work, particle lifetimes, wheel density, XR settings
 npm run test:audio:browser # real Web Audio stress + entire show/sandbox audio render
 node tools/screenshot.mjs shots   # headless smoke test + screenshots
 ```
@@ -222,6 +223,19 @@ the show, and the rendered output ceiling. Offline rendering verifies signal
 and resource bounds; listening on the Quest is still needed to validate device
 performance. In a browser console, `window.__app.audio.getDiagnostics()` reports
 current/peak allocations, refusals, fades, HRTF usage, and actual audio latency.
+
+VR defaults favor steady frame delivery: the eye buffers render at 90% per
+dimension (19% fewer pixels), with dynamic moon shadows disabled in immersive
+VR. `?xrScale=1&shadows=1` restores full resolution and shadows. Desktop rendering
+keeps shadows. Foveation remains off to avoid the visible tile boundaries on
+the wheel's thin lattice. The wheel keeps its full geometry and close-up fire,
+with reduced sparks/smoke at a distance. The shared particle pool trims unused
+and expired ends from its submitted draw range, retaining future-born effects.
+
+`window.__app.getPerformance()` reports recent frame-interval and CPU submission
+percentiles, late frames against the headset's reported target rate, submitted
+particle slots, and rendering settings. These are frame timing diagnostics,
+not GPU timing measurements; validate headset smoothness on the Quest itself.
 
 MIT licensed. Nearly all art and audio are procedural; the exceptions are credited in
 [`assets/textures/README.md`](assets/textures/README.md) (sky and moon imagery, and the
